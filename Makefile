@@ -26,4 +26,7 @@ clean:
 install: $(TARGET)
 	cp $(TARGET) /usr/local/bin/
 
-.PHONY: all clean install
+run: $(TARGET)
+	./$(TARGET)
+
+.PHONY: all clean install run

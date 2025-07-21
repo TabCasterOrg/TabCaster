@@ -40,6 +40,7 @@ int dm_get_screens(DisplayManager *dm) {
     if (!dm->screens) return -1;
     
     dm->screen_count = 0;
+    int connected_count = 0;  // Track only connected monitors
     
     // Check each available output
     for (int i = 0; i < dm->resources->noutput; i++) {
@@ -56,44 +57,52 @@ int dm_get_screens(DisplayManager *dm) {
         screen->output_id = dm->resources->outputs[i];
         screen->connected = (output_info->connection == RR_Connected);
         
-        // Get geometry if connected and has CRTC
-        if (screen->connected && output_info->crtc) {
-            screen->crtc_id = output_info->crtc;
+        // Only increment connected count for actually connected monitors
+        if (screen->connected) {
+            connected_count++;
             
-            XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(dm->display, 
-                                                    dm->resources, 
-                                                    output_info->crtc);
-            if (crtc_info) {
-                screen->x = crtc_info->x;
-                screen->y = crtc_info->y;
-                screen->width = crtc_info->width;
-                screen->height = crtc_info->height;
-                XRRFreeCrtcInfo(crtc_info);
+            // Get geometry if has CRTC
+            if (output_info->crtc) {
+                screen->crtc_id = output_info->crtc;
+                
+                XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(dm->display, 
+                                                        dm->resources, 
+                                                        output_info->crtc);
+                if (crtc_info) {
+                    screen->x = crtc_info->x;
+                    screen->y = crtc_info->y;
+                    screen->width = crtc_info->width;
+                    screen->height = crtc_info->height;
+                    XRRFreeCrtcInfo(crtc_info);
+                }
+                
+                // Check if primary monitor
+                RROutput primary = XRRGetOutputPrimary(dm->display, dm->root);
+                screen->primary = (primary == screen->output_id);
             }
-            
-            // Check if primary monitor
-            RROutput primary = XRRGetOutputPrimary(dm->display, dm->root);
-            screen->primary = (primary == screen->output_id);
         }
         
         XRRFreeOutputInfo(output_info);
         dm->screen_count++;
     }
     
-    return dm->screen_count;
+    return connected_count;  // Return only connected count
 }
 
-// Print monitor info in readable format
+// Print all outputs and their connection status
 void dm_print_screens(DisplayManager *dm) {
     if (!dm || !dm->screens) return;
     
-    printf("Connected screens:\n");
+    printf("All outputs:\n");
     for (int i = 0; i < dm->screen_count; i++) {
         ScreenInfo *s = &dm->screens[i];
+        
         if (s->connected) {
-            printf("  %s: %dx%d+%d+%d%s\n", 
+            printf("  %s: %dx%d+%d+%d%s [CONNECTED]\n", 
                    s->name, s->width, s->height, s->x, s->y,
                    s->primary ? " (primary)" : "");
+        } else {
+            printf("  %s: [DISCONNECTED]\n", s->name);
         }
     }
 }

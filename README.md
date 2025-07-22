@@ -1,10 +1,11 @@
 # TabCaster
-A C implementation of TabCaster Server which acts as a screen manager and serves a virtual display to companion client app.
 
+A C implementation of TabCaster Server which acts as a screen manager and serves a virtual display to companion client app.
 
 # Building and Running Tabcaster
 
 ## Prerequisites
+
 Make sure you have the required development packages installed:
 
 **Ubuntu/Debian:**
@@ -24,6 +25,11 @@ sudo pacman -S gcc libx11 libxrandr
 
 ## Building
 
+**Clone the project:**
+```bash
+git clone https://github.com/GuranshS/TabCaster.git
+```
+
 **Compile the project:**
 ```bash
 make
@@ -38,6 +44,8 @@ make clean
 ```bash
 make clean && make
 ```
+
+The build will be placed into the `build/` folder.
 
 ## Running
 
@@ -68,6 +76,5 @@ Connected screens:
 
 **Permission denied:**
 - Make sure the binary is executable: `chmod +x tabcaster`
-
 
 The program will automatically detect all connected monitors and display their configuration - no command line arguments needed.

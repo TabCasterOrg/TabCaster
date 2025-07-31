@@ -24,20 +24,19 @@ typedef struct {
     Window root;                   // Root window (desktop)
     int screen;                    // Default screen number
     XRRScreenResources *resources; // XRandR screen resources (outputs/monitors)
-    ScreenInfo *screens;           // Array of monitor info
-    int screen_count;              // Number of monitors
+    ScreenInfo *screens;           // Array of monitor info (all outputs)
+    int screen_count;              // Total number of outputs (connected + disconnected)
 } DisplayManager;
 
-// Initialize display manager - returns NULL on failure
-DisplayManager* dm_init(void);
+// Core functions
+DisplayManager* dm_init(void);                    // Initialize display manager - returns NULL on failure
+int dm_get_screens(DisplayManager *dm);           // Get all screen info - returns number of connected monitors, -1 on error
+void dm_print_screens(DisplayManager *dm);        // Print monitor info to stdout
+void dm_cleanup(DisplayManager *dm);              // Clean up resources - safe to call with NULL
 
-// Get monitor info - returns number of connected monitors, -1 on error
-int dm_get_screens(DisplayManager *dm);
-
-// Print monitor info to stdout
-void dm_print_screens(DisplayManager *dm);
-
-// Clean up resources - safe to call with NULL
-void dm_cleanup(DisplayManager *dm);
+// Utility functions for working with screen data
+int dm_count_connected_screens(DisplayManager *dm);     // Count currently connected screens
+int dm_count_disconnected_screens(DisplayManager *dm);  // Count currently disconnected screens
+ScreenInfo* dm_get_primary_screen(DisplayManager *dm);  // Get pointer to primary screen (NULL if none)
 
 #endif

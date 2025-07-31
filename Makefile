@@ -1,10 +1,10 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2
-LDFLAGS = -lX11 -lXrandr
+LDFLAGS = -lX11 -lXrandr -lxcvt
 
 SRCDIR = .
 BUILDDIR = build
-SRCS = main.c display_manager.c
+SRCS = main.c display_manager.c mode_manager.c
 OBJS = $(SRCS:%.c=$(BUILDDIR)/%.o)
 TARGET = $(BUILDDIR)/tabcaster
 

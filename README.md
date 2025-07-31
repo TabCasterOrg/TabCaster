@@ -10,7 +10,7 @@ Make sure you have the required development packages installed:
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt install build-essential libx11-dev libxrandr-dev
+sudo apt install build-essential libx11-dev libxrandr-dev libxcvt-dev
 ```
 
 **Fedora/RHEL:**
@@ -51,7 +51,7 @@ The build will be placed into the `build/` folder.
 
 **Basic usage:**
 ```bash
-./tabcaster
+./build/tabcaster
 ```
 
 **Example output:**
@@ -61,6 +61,28 @@ Found 2 connected monitors
 Connected screens:
   eDP-1: 1920x1080+0+0 (primary)
   HDMI-1: 2560x1440+1920+0
+```
+
+**Help Command:**
+```bash
+./build/tabcaster
+```
+**Example output:**
+```
+Usage: ./build/tabcaster [options]
+Options:
+  --list                    List all outputs and their status
+  --create-mode WxH@R       Create CVT mode (e.g., 2336x1080@60)
+  --add-mode OUTPUT ID      Add existing mode (by ID) to output
+  --remove-mode OUTPUT ID   Remove mode (by ID) from output
+  --delete-mode ID          Delete mode (by ID) from XRandR entirely
+  --reduced-blanking        Use reduced blanking for CVT (with --create-mode)
+  --help                    Show this help
+
+Examples:
+  ./build/tabcaster --create-mode 2336x1080@60
+  ./build/tabcaster --add-mode HDMI1 123456789
+  ./build/tabcaster --remove-mode HDMI1 2336x1080_60.00
 ```
 
 ## Troubleshooting

@@ -31,18 +31,99 @@ DisplayManager* dm_init(void) {
     return dm;
 }
 
-// Enumerate connected monitors and get their info
+// Extract geometry information from CRTC
+static void extract_geometry(DisplayManager *dm, ScreenInfo *screen, RRCrtc crtc) {
+    XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(dm->display, dm->resources, crtc);
+    if (crtc_info) {
+        screen->x = crtc_info->x;
+        screen->y = crtc_info->y;
+        screen->width = crtc_info->width;
+        screen->height = crtc_info->height;
+        XRRFreeCrtcInfo(crtc_info);
+    }
+}
+
+// Check if output is the primary monitor
+static bool is_primary_output(DisplayManager *dm, RROutput output_id) {
+    RROutput primary = XRRGetOutputPrimary(dm->display, dm->root);
+    return (primary == output_id);
+}
+
+// Populate a single ScreenInfo structure from XRROutputInfo
+static void populate_screen_info(DisplayManager *dm, ScreenInfo *screen, 
+                                RROutput output_id, XRROutputInfo *output_info) {
+    // Basic information
+    snprintf(screen->name, sizeof(screen->name), "%s", output_info->name);
+    screen->output_id = output_id;
+    screen->connected = (output_info->connection == RR_Connected);
+    
+    // Only get geometry and primary status for connected monitors
+    if (screen->connected && output_info->crtc) {
+        screen->crtc_id = output_info->crtc;
+        extract_geometry(dm, screen, output_info->crtc);
+        screen->primary = is_primary_output(dm, output_id);
+    } else {
+        // Initialize disconnected monitor fields
+        screen->crtc_id = 0;
+        screen->x = screen->y = 0;
+        screen->width = screen->height = 0;
+        screen->primary = false;
+    }
+}
+
+// Allocate screen array for all outputs
+static int allocate_screen_array(DisplayManager *dm) {
+    int array_size = dm->resources->noutput;
+    
+    if (array_size <= 0) return 0;
+    
+    dm->screens = calloc(array_size, sizeof(ScreenInfo));
+    return dm->screens ? array_size : -1;
+}
+
+// Utility function to count connected screens (after population)
+int dm_count_connected_screens(DisplayManager *dm) {
+    if (!dm || !dm->screens) return 0;
+    
+    int connected = 0;
+    for (int i = 0; i < dm->screen_count; i++) {
+        if (dm->screens[i].connected) {
+            connected++;
+        }
+    }
+    return connected;
+}
+
+// Utility function to count disconnected screens
+int dm_count_disconnected_screens(DisplayManager *dm) {
+    if (!dm || !dm->screens) return 0;
+    
+    return dm->screen_count - dm_count_connected_screens(dm);
+}
+
+// Get pointer to primary screen (returns NULL if no primary found)
+ScreenInfo* dm_get_primary_screen(DisplayManager *dm) {
+    if (!dm || !dm->screens) return NULL;
+    
+    for (int i = 0; i < dm->screen_count; i++) {
+        if (dm->screens[i].connected && dm->screens[i].primary) {
+            return &dm->screens[i];
+        }
+    }
+    return NULL;
+}
+
+// Main function - enumerate and populate all screens
 int dm_get_screens(DisplayManager *dm) {
     if (!dm || !dm->resources) return -1;
     
-    // Allocate space for monitor info
-    dm->screens = calloc(dm->resources->noutput, sizeof(ScreenInfo));
-    if (!dm->screens) return -1;
+    // Allocate space for all outputs
+    int max_screens = allocate_screen_array(dm);
+    if (max_screens <= 0) return max_screens;
     
     dm->screen_count = 0;
-    int connected_count = 0;  // Track only connected monitors
     
-    // Check each available output
+    // Process each output
     for (int i = 0; i < dm->resources->noutput; i++) {
         XRROutputInfo *output_info = XRRGetOutputInfo(dm->display, 
                                                       dm->resources, 
@@ -50,43 +131,14 @@ int dm_get_screens(DisplayManager *dm) {
         if (!output_info) continue;
         
         ScreenInfo *screen = &dm->screens[dm->screen_count];
-        
-        // Store basic info
-        strncpy(screen->name, output_info->name, sizeof(screen->name) - 1);
-        screen->name[sizeof(screen->name) - 1] = '\0';
-        screen->output_id = dm->resources->outputs[i];
-        screen->connected = (output_info->connection == RR_Connected);
-        
-        // Only increment connected count for actually connected monitors
-        if (screen->connected) {
-            connected_count++;
-            
-            // Get geometry if has CRTC
-            if (output_info->crtc) {
-                screen->crtc_id = output_info->crtc;
-                
-                XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(dm->display, 
-                                                        dm->resources, 
-                                                        output_info->crtc);
-                if (crtc_info) {
-                    screen->x = crtc_info->x;
-                    screen->y = crtc_info->y;
-                    screen->width = crtc_info->width;
-                    screen->height = crtc_info->height;
-                    XRRFreeCrtcInfo(crtc_info);
-                }
-                
-                // Check if primary monitor
-                RROutput primary = XRRGetOutputPrimary(dm->display, dm->root);
-                screen->primary = (primary == screen->output_id);
-            }
-        }
+        populate_screen_info(dm, screen, dm->resources->outputs[i], output_info);
         
         XRRFreeOutputInfo(output_info);
         dm->screen_count++;
     }
     
-    return connected_count;  // Return only connected count
+    // Return count of connected screens (calculated after population)
+    return dm_count_connected_screens(dm);
 }
 
 // Print all outputs and their connection status

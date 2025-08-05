@@ -41,6 +41,35 @@ static void convert_libxcvt_to_xrr(const struct libxcvt_mode_info *cvt_mode, XRR
     xrr_mode->nameLength = strlen(mode_name);
 }
 
+// Find an available CRTC that's not currently in use
+static RRCrtc find_available_crtc(DisplayManager *dm) {
+    for (int i = 0; i < dm->resources->ncrtc; i++) {
+        RRCrtc crtc = dm->resources->crtcs[i];
+        XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(dm->display, dm->resources, crtc);
+        
+        if (crtc_info) {
+            // CRTC is available if it has no outputs assigned
+            bool available = (crtc_info->noutput == 0);
+            XRRFreeCrtcInfo(crtc_info);
+            
+            if (available) {
+                return crtc;
+            }
+        }
+    }
+    return None; // No available CRTC found
+}
+
+// Find output ID by name
+static RROutput find_output_by_name(DisplayManager *dm, const char *output_name) {
+    for (int i = 0; i < dm->screen_count; i++) {
+        if (strcmp(dm->screens[i].name, output_name) == 0) {
+            return dm->screens[i].output_id;
+        }
+    }
+    return None;
+}
+
 // Create CVT mode using libxcvt and convert to XRandR
 RRMode mode_create_cvt(DisplayManager *dm, unsigned int width, unsigned int height, 
                       double refresh_rate, bool reduced_blanking) {
@@ -190,4 +219,247 @@ RRMode mode_find_by_name(DisplayManager *dm, const char *mode_name) {
     
     XRRFreeScreenResources(current_resources);
     return 0; // Mode not found
+}
+
+// Enable output with a specific mode (mimics xrandr --output HDMI-1 --mode 2336x1080_60.00)
+int mode_enable_output_with_mode(DisplayManager *dm, const char *output_name, 
+                                 const char *mode_name, int x_pos, int y_pos) {
+    if (!dm || !output_name || !mode_name) return -1;
+    
+    // Find the output
+    RROutput output = find_output_by_name(dm, output_name);
+    if (output == None) {
+        fprintf(stderr, "Output '%s' not found\n", output_name);
+        return -1;
+    }
+    
+    // Find the mode by name
+    RRMode mode = mode_find_by_name(dm, mode_name);
+    if (mode == 0) {
+        fprintf(stderr, "Mode '%s' not found\n", mode_name);
+        return -1;
+    }
+    
+    // Find an available CRTC
+    RRCrtc crtc = find_available_crtc(dm);
+    if (crtc == None) {
+        fprintf(stderr, "No available CRTC found for output '%s'\n", output_name);
+        return -1;
+    }
+    
+    // Configure the CRTC with the output and mode
+    Status result = XRRSetCrtcConfig(dm->display, dm->resources, crtc, 
+                                    CurrentTime, x_pos, y_pos, mode, 
+                                    RR_Rotate_0, &output, 1);
+    
+    XSync(dm->display, False);
+    
+    if (result == RRSetConfigSuccess) {
+        printf("Enabled output '%s' with mode '%s' at position %d,%d\n", 
+               output_name, mode_name, x_pos, y_pos);
+        return 0;
+    } else {
+        fprintf(stderr, "Failed to enable output '%s' (error code: %d)\n", 
+                output_name, result);
+        return -1;
+    }
+}
+
+// Enable output with mode ID (alternative version)
+int mode_enable_output_with_mode_id(DisplayManager *dm, const char *output_name, 
+                                   RRMode mode_id, int x_pos, int y_pos) {
+    if (!dm || !output_name || mode_id == 0) return -1;
+    
+    RROutput output = find_output_by_name(dm, output_name);
+    if (output == None) {
+        fprintf(stderr, "Output '%s' not found\n", output_name);
+        return -1;
+    }
+    
+    RRCrtc crtc = find_available_crtc(dm);
+    if (crtc == None) {
+        fprintf(stderr, "No available CRTC found for output '%s'\n", output_name);
+        return -1;
+    }
+    
+    Status result = XRRSetCrtcConfig(dm->display, dm->resources, crtc, 
+                                    CurrentTime, x_pos, y_pos, mode_id, 
+                                    RR_Rotate_0, &output, 1);
+    
+    XSync(dm->display, False);
+    
+    if (result == RRSetConfigSuccess) {
+        printf("Enabled output '%s' with mode ID %lu at position %d,%d\n", 
+               output_name, mode_id, x_pos, y_pos);
+        return 0;
+    } else {
+        fprintf(stderr, "Failed to enable output '%s' (error code: %d)\n", 
+                output_name, result);
+        return -1;
+    }
+}
+
+// Disable output (mimics xrandr --output HDMI-1 --off)
+int mode_disable_output(DisplayManager *dm, const char *output_name) {
+    if (!dm || !output_name) return -1;
+    
+    RROutput output = find_output_by_name(dm, output_name);
+    if (output == None) {
+        fprintf(stderr, "Output '%s' not found\n", output_name);
+        return -1;
+    }
+    
+    // Get current CRTC for this output
+    XRROutputInfo *output_info = XRRGetOutputInfo(dm->display, dm->resources, output);
+    if (!output_info) {
+        fprintf(stderr, "Failed to get output info for '%s'\n", output_name);
+        return -1;
+    }
+    
+    if (output_info->crtc == None) {
+        printf("Output '%s' is already disabled\n", output_name);
+        XRRFreeOutputInfo(output_info);
+        return 0;
+    }
+    
+    RRCrtc crtc = output_info->crtc;
+    XRRFreeOutputInfo(output_info);
+    
+    // Disable the CRTC (set no mode, no outputs)
+    Status result = XRRSetCrtcConfig(dm->display, dm->resources, crtc, 
+                                    CurrentTime, 0, 0, None, 
+                                    RR_Rotate_0, NULL, 0);
+    
+    XSync(dm->display, False);
+    
+    if (result == RRSetConfigSuccess) {
+        printf("Disabled output '%s'\n", output_name);
+        return 0;
+    } else {
+        fprintf(stderr, "Failed to disable output '%s' (error code: %d)\n", 
+                output_name, result);
+        return -1;
+    }
+}
+
+// Print all modes available for a specific output
+void mode_print_output_modes(DisplayManager *dm, const char *output_name) {
+    if (!dm || !output_name) return;
+    
+    RROutput output = find_output_by_name(dm, output_name);
+    if (output == None) {
+        fprintf(stderr, "Output '%s' not found\n", output_name);
+        return;
+    }
+    
+    XRROutputInfo *output_info = XRRGetOutputInfo(dm->display, dm->resources, output);
+    if (!output_info) {
+        fprintf(stderr, "Failed to get output info for '%s'\n", output_name);
+        return;
+    }
+    
+    printf("Available modes for output '%s':\n", output_name);
+    if (output_info->nmode == 0) {
+        printf("  No modes available\n");
+    } else {
+        for (int i = 0; i < output_info->nmode; i++) {
+            RRMode mode_id = output_info->modes[i];
+            
+            // Find mode info in screen resources
+            XRRModeInfo *mode_info = NULL;
+            for (int j = 0; j < dm->resources->nmode; j++) {
+                if (dm->resources->modes[j].id == mode_id) {
+                    mode_info = &dm->resources->modes[j];
+                    break;
+                }
+            }
+            
+            if (mode_info) {
+                // Calculate refresh rate
+                double refresh_rate = 0.0;
+                if (mode_info->hTotal && mode_info->vTotal) {
+                    refresh_rate = (double)mode_info->dotClock / 
+                                  (double)(mode_info->hTotal * mode_info->vTotal);
+                }
+                
+                // Print mode name or create one if it doesn't have a proper name
+                char mode_name[256];
+                if (mode_info->nameLength > 0 && mode_info->name) {
+                    snprintf(mode_name, sizeof(mode_name), "%.*s", 
+                            (int)mode_info->nameLength, mode_info->name);
+                } else {
+                    snprintf(mode_name, sizeof(mode_name), "%dx%d_%.2f", 
+                            mode_info->width, mode_info->height, refresh_rate);
+                }
+                
+                printf("  %s (%dx%d @ %.2f Hz) [ID: %lu]\n", 
+                       mode_name, mode_info->width, mode_info->height, 
+                       refresh_rate, mode_id);
+            } else {
+                printf("  [Mode ID: %lu - info not available]\n", mode_id);
+            }
+        }
+    }
+    
+    XRRFreeOutputInfo(output_info);
+}
+
+// Print modes for all outputs
+void mode_print_all_output_modes(DisplayManager *dm) {
+    if (!dm || !dm->screens) return;
+    
+    for (int i = 0; i < dm->screen_count; i++) {
+        mode_print_output_modes(dm, dm->screens[i].name);
+        printf("\n");
+    }
+}
+
+// Check if output is currently enabled (has an active CRTC)
+bool mode_is_output_enabled(DisplayManager *dm, const char *output_name) {
+    if (!dm || !output_name) return false;
+    
+    RROutput output = find_output_by_name(dm, output_name);
+    if (output == None) return false;
+    
+    XRROutputInfo *output_info = XRRGetOutputInfo(dm->display, dm->resources, output);
+    if (!output_info) return false;
+    
+    bool enabled = (output_info->crtc != None);
+    XRRFreeOutputInfo(output_info);
+    
+    return enabled;
+}
+
+// Get current mode and position for an enabled output
+int mode_get_output_config(DisplayManager *dm, const char *output_name, 
+                          RRMode *current_mode, int *x, int *y, 
+                          unsigned int *width, unsigned int *height) {
+    if (!dm || !output_name || !current_mode || !x || !y || !width || !height) 
+        return -1;
+    
+    RROutput output = find_output_by_name(dm, output_name);
+    if (output == None) return -1;
+    
+    XRROutputInfo *output_info = XRRGetOutputInfo(dm->display, dm->resources, output);
+    if (!output_info || output_info->crtc == None) {
+        if (output_info) XRRFreeOutputInfo(output_info);
+        return -1; // Output not enabled
+    }
+    
+    XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(dm->display, dm->resources, output_info->crtc);
+    if (!crtc_info) {
+        XRRFreeOutputInfo(output_info);
+        return -1;
+    }
+    
+    *current_mode = crtc_info->mode;
+    *x = crtc_info->x;
+    *y = crtc_info->y;
+    *width = crtc_info->width;
+    *height = crtc_info->height;
+    
+    XRRFreeCrtcInfo(crtc_info);
+    XRRFreeOutputInfo(output_info);
+    
+    return 0;
 }

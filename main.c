@@ -9,16 +9,26 @@ void print_usage(const char *program_name) {
     printf("Usage: %s [options]\n", program_name);
     printf("Options:\n");
     printf("  --list                    List all outputs and their status\n");
+    printf("  --list-modes [OUTPUT]     List modes for specific output or all outputs\n");
     printf("  --create-mode WxH@R       Create CVT mode (e.g., 2336x1080@60)\n");
     printf("  --add-mode OUTPUT ID      Add existing mode (by ID) to output\n");
     printf("  --remove-mode OUTPUT ID   Remove mode (by ID) from output\n");
     printf("  --delete-mode ID          Delete mode (by ID) from XRandR entirely\n");
+    printf("  --enable OUTPUT MODE      Enable output with specific mode name\n");
+    printf("  --enable-id OUTPUT ID     Enable output with specific mode ID\n");
+    printf("  --disable OUTPUT          Disable output\n");
+    printf("  --status OUTPUT           Show current status of output\n");
+    printf("  --position X,Y            Set position when enabling output (default: 0,0)\n");
     printf("  --reduced-blanking        Use reduced blanking for CVT (with --create-mode)\n");
     printf("  --help                    Show this help\n");
     printf("\nExamples:\n");
     printf("  %s --create-mode 2336x1080@60\n", program_name);
-    printf("  %s --add-mode HDMI1 123456789\n", program_name);
-    printf("  %s --remove-mode HDMI1 2336x1080_60.00\n", program_name);
+    printf("  %s --add-mode HDMI-1 123456789\n", program_name);
+    printf("  %s --enable HDMI-1 2336x1080_60.00\n", program_name);
+    printf("  %s --enable-id HDMI-1 123456789 --position 1920,0\n", program_name);
+    printf("  %s --disable HDMI-1\n", program_name);
+    printf("  %s --list-modes HDMI-1\n", program_name);
+    printf("  %s --status HDMI-1\n", program_name);
 }
 
 // Parse mode specification (WxH@R format)
@@ -47,26 +57,99 @@ int parse_mode_spec(const char *spec, unsigned int *width, unsigned int *height,
     return 0;
 }
 
+// Parse position specification (X,Y format)
+int parse_position(const char *pos_str, int *x, int *y) {
+    if (!pos_str || !x || !y) return -1;
+    
+    int parsed = sscanf(pos_str, "%d,%d", x, y);
+    if (parsed != 2) {
+        fprintf(stderr, "Invalid position specification: %s\n", pos_str);
+        fprintf(stderr, "Expected format: X,Y (e.g., 1920,0)\n");
+        return -1;
+    }
+    
+    return 0;
+}
+
+// Print output status information
+void print_output_status(DisplayManager *dm, const char *output_name) {
+    if (!dm || !output_name) return;
+    
+    printf("Status for output '%s':\n", output_name);
+    
+    // Check if output exists and is connected
+    bool found = false;
+    bool connected = false;
+    for (int i = 0; i < dm->screen_count; i++) {
+        if (strcmp(dm->screens[i].name, output_name) == 0) {
+            found = true;
+            connected = dm->screens[i].connected;
+            printf("  Connection: %s\n", connected ? "CONNECTED" : "DISCONNECTED");
+            if (connected) {
+                printf("  Primary: %s\n", dm->screens[i].primary ? "YES" : "NO");
+            }
+            break;
+        }
+    }
+    
+    if (!found) {
+        printf("  Output not found\n");
+        return;
+    }
+    
+    // Check if enabled
+    bool enabled = mode_is_output_enabled(dm, output_name);
+    printf("  Enabled: %s\n", enabled ? "YES" : "NO");
+    
+    if (enabled) {
+        RRMode current_mode;
+        int x, y;
+        unsigned int width, height;
+        
+        if (mode_get_output_config(dm, output_name, &current_mode, &x, &y, &width, &height) == 0) {
+            printf("  Current mode ID: %lu\n", current_mode);
+            printf("  Resolution: %ux%u\n", width, height);
+            printf("  Position: %d,%d\n", x, y);
+        }
+    }
+    
+    printf("\n");
+}
+
 // Main entry point with command line argument parsing
 int main(int argc, char *argv[]) {
-    printf("Tabcaster - C Version with CVT Mode Creation\n");
+    printf("Tabcaster - C Version with Output Management\n");
     
     // Parse command line arguments
     bool list_mode = false;
+    bool list_modes = false;
     bool create_mode = false;
     bool add_mode = false;
     bool remove_mode = false;
     bool delete_mode = false;
+    bool enable_output = false;
+    bool enable_output_id = false;
+    bool disable_output = false;
+    bool show_status = false;
     bool reduced_blanking = false;
     
     char *mode_spec = NULL;
     char *output_name = NULL;
+    char *mode_name = NULL;
+    char *status_output = NULL;
+    char *list_modes_output = NULL;
     RRMode mode_id = 0;
+    int pos_x = 0, pos_y = 0;
     
     // Simple argument parsing
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--list") == 0) {
             list_mode = true;
+        } else if (strcmp(argv[i], "--list-modes") == 0) {
+            list_modes = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                list_modes_output = argv[++i];
+            }
         } else if (strcmp(argv[i], "--create-mode") == 0 && i + 1 < argc) {
             create_mode = true;
             mode_spec = argv[++i];
@@ -81,6 +164,24 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--delete-mode") == 0 && i + 1 < argc) {
             delete_mode = true;
             mode_id = (RRMode)strtoul(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--enable") == 0 && i + 2 < argc) {
+            enable_output = true;
+            output_name = argv[++i];
+            mode_name = argv[++i];
+        } else if (strcmp(argv[i], "--enable-id") == 0 && i + 2 < argc) {
+            enable_output_id = true;
+            output_name = argv[++i];
+            mode_id = (RRMode)strtoul(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--disable") == 0 && i + 1 < argc) {
+            disable_output = true;
+            output_name = argv[++i];
+        } else if (strcmp(argv[i], "--status") == 0 && i + 1 < argc) {
+            show_status = true;
+            status_output = argv[++i];
+        } else if (strcmp(argv[i], "--position") == 0 && i + 1 < argc) {
+            if (parse_position(argv[++i], &pos_x, &pos_y) != 0) {
+                return 1;
+            }
         } else if (strcmp(argv[i], "--reduced-blanking") == 0) {
             reduced_blanking = true;
         } else if (strcmp(argv[i], "--help") == 0) {
@@ -122,6 +223,14 @@ int main(int argc, char *argv[]) {
         dm_print_screens(dm);
     }
     
+    if (list_modes) {
+        if (list_modes_output) {
+            mode_print_output_modes(dm, list_modes_output);
+        } else {
+            mode_print_all_output_modes(dm);
+        }
+    }
+    
     if (create_mode) {
         unsigned int width, height;
         double refresh_rate;
@@ -131,13 +240,13 @@ int main(int argc, char *argv[]) {
                    width, height, refresh_rate,
                    reduced_blanking ? " (reduced blanking)" : "");
             
-            // Direct libxcvt usage - much simpler!
             RRMode new_mode_id = mode_create_cvt(dm, width, height, refresh_rate, reduced_blanking);
             
             if (new_mode_id != 0) {
                 printf("Mode created successfully with ID: %lu\n", new_mode_id);
-                printf("To use this mode, add it to an output with:\n");
-                printf("  %s --add-mode OUTPUT_NAME %lu\n", argv[0], new_mode_id);
+                printf("To use this mode:\n");
+                printf("  Add to output: %s --add-mode OUTPUT_NAME %lu\n", argv[0], new_mode_id);
+                printf("  Enable output: %s --enable-id OUTPUT_NAME %lu\n", argv[0], new_mode_id);
             } else {
                 fprintf(stderr, "Failed to create CVT mode\n");
             }
@@ -147,6 +256,9 @@ int main(int argc, char *argv[]) {
     if (add_mode) {
         if (mode_add_to_output(dm, output_name, mode_id) != 0) {
             fprintf(stderr, "Failed to add mode to output\n");
+        } else {
+            printf("Mode added successfully. You can now enable it with:\n");
+            printf("  %s --enable-id %s %lu\n", argv[0], output_name, mode_id);
         }
     }
     
@@ -160,6 +272,34 @@ int main(int argc, char *argv[]) {
         if (mode_delete_from_xrandr(dm, mode_id) != 0) {
             fprintf(stderr, "Failed to delete mode\n");
         }
+    }
+    
+    if (enable_output) {
+        printf("Enabling output '%s' with mode '%s' at position %d,%d\n", 
+               output_name, mode_name, pos_x, pos_y);
+        
+        if (mode_enable_output_with_mode(dm, output_name, mode_name, pos_x, pos_y) != 0) {
+            fprintf(stderr, "Failed to enable output with mode\n");
+        }
+    }
+    
+    if (enable_output_id) {
+        printf("Enabling output '%s' with mode ID %lu at position %d,%d\n", 
+               output_name, mode_id, pos_x, pos_y);
+        
+        if (mode_enable_output_with_mode_id(dm, output_name, mode_id, pos_x, pos_y) != 0) {
+            fprintf(stderr, "Failed to enable output with mode ID\n");
+        }
+    }
+    
+    if (disable_output) {
+        if (mode_disable_output(dm, output_name) != 0) {
+            fprintf(stderr, "Failed to disable output\n");
+        }
+    }
+    
+    if (show_status) {
+        print_output_status(dm, status_output);
     }
     
     // Clean up

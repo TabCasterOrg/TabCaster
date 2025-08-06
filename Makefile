@@ -4,7 +4,7 @@ LDFLAGS = -lX11 -lXrandr -lxcvt
 
 SRCDIR = .
 BUILDDIR = build
-SRCS = main.c display_manager.c mode_manager.c
+SRCS = main.c display_manager.c mode_manager.c frame_capture.c
 OBJS = $(SRCS:%.c=$(BUILDDIR)/%.o)
 TARGET = $(BUILDDIR)/tabcaster
 

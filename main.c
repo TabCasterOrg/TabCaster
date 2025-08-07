@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>  // Add this for usleep()
+#include <unistd.h>  
 #include "display_manager.h"
 #include "mode_manager.h"
 #include "frame_capture.h"  
@@ -25,7 +25,7 @@ void print_usage(const char *program_name) {
     printf("  --status OUTPUT           Show current status of output\n");
     printf("  --position X,Y            Set position when enabling output (default: 0,0)\n");
     printf("  --reduced-blanking        Use reduced blanking for CVT (with --create-mode)\n");
-    printf("  --capture OUTPUT          Capture frames from output (works with virtual displays)\n");
+    printf("  --capture OUTPUT          Capture frames from output\n");
     printf("  --fps FPS                 Set capture frame rate (default: 30, use with --capture)\n");
     printf("  --help                    Show this help\n");
     printf("\nExamples:\n");
@@ -38,6 +38,7 @@ void print_usage(const char *program_name) {
     printf("  %s --status HDMI-1\n", program_name);
     printf("  %s --capture HDMI-1\n", program_name);
     printf("  %s --fps 60\n", program_name);
+    printf("\nCapture files are saved in ./captures/ directory\n");
 }
 
 // Parse mode specification (WxH@R format)
@@ -331,32 +332,34 @@ int main(int argc, char *argv[]) {
     if (show_status) {
         print_output_status(dm, status_output);
     }
-        // Frame capture (if requested)
+        
+    // Frame capture (if requested)
     if (enable_capture && capture_output) {
         printf("\n=== Frame Capture ===\n");
         
-        SimpleCapture *sc = sc_init(dm, capture_output, capture_fps);
-        if (!sc) {
+        FrameCapture *fc = fc_init(dm, capture_output, capture_fps);
+        if (!fc) {
             fprintf(stderr, "Failed to initialize capture\n");
             dm_cleanup(dm);
             return 1;
         }
         
-        sc_print_frame_info(sc);
+        fc_print_frame_info(fc);
         
-        if (sc_start(sc) != 0) {
-            sc_cleanup(sc);
+        if (fc_start(fc) != 0) {
+            fc_cleanup(fc);
             dm_cleanup(dm);
             return 1;
         }
         
         signal(SIGINT, signal_handler);
         printf("Capturing... Press Ctrl+C to stop\n");
+        printf("Frames will be saved to ./captures/ directory\n");
         
         // Simple capture loop
         int frame_count = 0;
         while (keep_running) {
-            int result = sc_capture_frame(sc);
+            int result = fc_capture_frame(fc);
             
             if (result == 1) {  // New frame captured
                 frame_count++;
@@ -367,10 +370,10 @@ int main(int argc, char *argv[]) {
                 if (frame_count % 60 == 0) {
                     char filename[64];
                     snprintf(filename, sizeof(filename), "capture_%04d.ppm", frame_count);
-                    sc_save_frame_ppm(sc, filename);
+                    fc_save_frame_ppm(fc, filename);
                 }
                 
-                sc_mark_frame_processed(sc);
+                fc_mark_frame_processed(fc);
             } else if (result < 0) {
                 fprintf(stderr, "\nCapture failed\n");
                 break;
@@ -381,7 +384,7 @@ int main(int argc, char *argv[]) {
         }
         
         printf("\nCaptured %d frames\n", frame_count);
-        sc_cleanup(sc);
+        fc_cleanup(fc);
     }
     
     // Clean up

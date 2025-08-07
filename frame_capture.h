@@ -5,7 +5,7 @@
 #include <sys/time.h>
 #include <stdbool.h>
 
-// Minimal capture structure - just XGetImage
+// Frame capture structure - using XGetImage
 typedef struct {
     DisplayManager *dm;
     
@@ -23,22 +23,22 @@ typedef struct {
     XImage *current_frame;
     bool frame_ready;
     bool capturing;
-} SimpleCapture;
+} FrameCapture;
 
 // Core functions
-SimpleCapture* sc_init(DisplayManager *dm, const char *output_name, int fps);
-int sc_start(SimpleCapture *sc);
-int sc_capture_frame(SimpleCapture *sc);  // Returns 1 if new frame, 0 if too soon, -1 on error
-int sc_stop(SimpleCapture *sc);
-void sc_cleanup(SimpleCapture *sc);
+FrameCapture* fc_init(DisplayManager *dm, const char *output_name, int fps);
+int fc_start(FrameCapture *fc);
+int fc_capture_frame(FrameCapture *fc);  // Returns 1 if new frame, 0 if too soon, -1 on error
+int fc_stop(FrameCapture *fc);
+void fc_cleanup(FrameCapture *fc);
 
 // Frame access
-XImage* sc_get_frame(SimpleCapture *sc);
-bool sc_has_new_frame(SimpleCapture *sc);
-void sc_mark_frame_processed(SimpleCapture *sc);
+XImage* fc_get_frame(FrameCapture *fc);
+bool fc_has_new_frame(FrameCapture *fc);
+void fc_mark_frame_processed(FrameCapture *fc);
 
-// Simple utilities
-int sc_save_frame_ppm(SimpleCapture *sc, const char *filename);
-void sc_print_frame_info(SimpleCapture *sc);
+// Utilities
+int fc_save_frame_ppm(FrameCapture *fc, const char *filename);
+void fc_print_frame_info(FrameCapture *fc);
 
 #endif // FRAME_CAPTURE_H

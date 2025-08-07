@@ -1,31 +1,48 @@
 #include "frame_capture.h"
+#include "mode_manager.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
 
-// Initialize simple capture for a specific output
-SimpleCapture* sc_init(DisplayManager *dm, const char *output_name, int fps) {
+// Create captures directory if it doesn't exist
+static int create_captures_directory() {
+    struct stat st = {0};
+    
+    if (stat("captures", &st) == -1) {
+        if (mkdir("captures", 0755) == -1) {
+            perror("Failed to create captures directory");
+            return -1;
+        }
+        printf("Created captures directory\n");
+    }
+    return 0;
+}
+
+// Initialize frame capture for a specific output
+FrameCapture* fc_init(DisplayManager *dm, const char *output_name, int fps) {
     if (!dm || !output_name) return NULL;
     
-    SimpleCapture *sc = calloc(1, sizeof(SimpleCapture));
-    if (!sc) return NULL;
+    FrameCapture *fc = calloc(1, sizeof(FrameCapture));
+    if (!fc) return NULL;
     
-    sc->dm = dm;
-    sc->target_fps = fps > 0 ? fps : 30;
-    sc->frame_interval_us = 1000000 / sc->target_fps;
-    strncpy(sc->output_name, output_name, sizeof(sc->output_name) - 1);
+    fc->dm = dm;
+    fc->target_fps = fps > 0 ? fps : 30;
+    fc->frame_interval_us = 1000000 / fc->target_fps;
+    strncpy(fc->output_name, output_name, sizeof(fc->output_name) - 1);
     
-    // Find the target screen in your existing ScreenInfo array
+    // Find the target screen in existing ScreenInfo array
     bool found = false;
     for (int i = 0; i < dm->screen_count; i++) {
         if (strcmp(dm->screens[i].name, output_name) == 0) {
             // For connected displays, use the existing screen info
             if (dm->screens[i].connected) {
-                sc->x = dm->screens[i].x;
-                sc->y = dm->screens[i].y;
-                sc->width = dm->screens[i].width;
-                sc->height = dm->screens[i].height;
+                fc->x = dm->screens[i].x;
+                fc->y = dm->screens[i].y;
+                fc->width = dm->screens[i].width;
+                fc->height = dm->screens[i].height;
                 found = true;
                 printf("Found connected output '%s'\n", output_name);
             } else {
@@ -36,15 +53,15 @@ SimpleCapture* sc_init(DisplayManager *dm, const char *output_name, int fps) {
                 
                 if (mode_get_output_config(dm, output_name, &current_mode, &x, &y, &width, &height) == 0) {
                     // Output has an active mode even though it's "disconnected"
-                    sc->x = x;
-                    sc->y = y;
-                    sc->width = width;
-                    sc->height = height;
+                    fc->x = x;
+                    fc->y = y;
+                    fc->width = width;
+                    fc->height = height;
                     found = true;
                     printf("Found virtual/enabled output '%s' (not physically connected but has active mode)\n", output_name);
                 } else {
                     printf("Output '%s' exists but has no active mode - cannot capture\n", output_name);
-                    free(sc);
+                    free(fc);
                     return NULL;
                 }
             }
@@ -54,105 +71,116 @@ SimpleCapture* sc_init(DisplayManager *dm, const char *output_name, int fps) {
     
     if (!found) {
         fprintf(stderr, "Output '%s' not found\n", output_name);
-        free(sc);
+        free(fc);
         return NULL;
     }
     
     // Validate capture area
-    if (sc->width == 0 || sc->height == 0) {
-        fprintf(stderr, "Invalid capture dimensions: %dx%d\n", sc->width, sc->height);
-        free(sc);
+    if (fc->width == 0 || fc->height == 0) {
+        fprintf(stderr, "Invalid capture dimensions: %dx%d\n", fc->width, fc->height);
+        free(fc);
+        return NULL;
+    }
+    
+    // Create captures directory
+    if (create_captures_directory() != 0) {
+        free(fc);
         return NULL;
     }
     
     printf("Capture initialized for '%s': %dx%d+%d+%d @ %d fps\n",
-           output_name, sc->width, sc->height, sc->x, sc->y, sc->target_fps);
+           output_name, fc->width, fc->height, fc->x, fc->y, fc->target_fps);
     
-    return sc;
+    return fc;
 }
 
 // Start capturing
-int sc_start(SimpleCapture *sc) {
-    if (!sc) return -1;
+int fc_start(FrameCapture *fc) {
+    if (!fc) return -1;
     
-    sc->capturing = true;
-    gettimeofday(&sc->last_capture, NULL);
-    sc->frame_ready = false;
+    fc->capturing = true;
+    gettimeofday(&fc->last_capture, NULL);
+    fc->frame_ready = false;
     
-    printf("Started capturing from '%s'\n", sc->output_name);
+    printf("Started capturing from '%s'\n", fc->output_name);
     return 0;
 }
 
-// Main capture function - call this repeatedly in your loop
-int sc_capture_frame(SimpleCapture *sc) {
-    if (!sc || !sc->capturing) return -1;
+// Main capture function
+int fc_capture_frame(FrameCapture *fc) {
+    if (!fc || !fc->capturing) return -1;
     
     // Rate limiting - check if enough time has passed
     struct timeval now;
     gettimeofday(&now, NULL);
     
-    long time_diff = (now.tv_sec - sc->last_capture.tv_sec) * 1000000 +
-                     (now.tv_usec - sc->last_capture.tv_usec);
+    long time_diff = (now.tv_sec - fc->last_capture.tv_sec) * 1000000 +
+                     (now.tv_usec - fc->last_capture.tv_usec);
     
-    if (time_diff < sc->frame_interval_us) {
+    if (time_diff < fc->frame_interval_us) {
         return 0; // Too soon for next frame
     }
     
     // Free previous frame if it exists
-    if (sc->current_frame) {
-        XDestroyImage(sc->current_frame);
-        sc->current_frame = NULL;
+    if (fc->current_frame) {
+        XDestroyImage(fc->current_frame);
+        fc->current_frame = NULL;
     }
     
     // Capture the screen region using XGetImage
     // For virtual displays, this captures whatever is rendered to that screen area
     // Note: The content might be black/empty if nothing is actually rendering there
-    sc->current_frame = XGetImage(sc->dm->display, sc->dm->root,
-                                  sc->x, sc->y, sc->width, sc->height,
+    fc->current_frame = XGetImage(fc->dm->display, fc->dm->root,
+                                  fc->x, fc->y, fc->width, fc->height,
                                   AllPlanes, ZPixmap);
     
-    if (!sc->current_frame) {
+    if (!fc->current_frame) {
         fprintf(stderr, "XGetImage failed for %s (%dx%d+%d+%d)\n",
-                sc->output_name, sc->width, sc->height, sc->x, sc->y);
+                fc->output_name, fc->width, fc->height, fc->x, fc->y);
         return -1;
     }
     
-    sc->frame_ready = true;
-    sc->last_capture = now;
+    fc->frame_ready = true;
+    fc->last_capture = now;
     
     return 1; // New frame captured
 }
 
 // Stop capturing
-int sc_stop(SimpleCapture *sc) {
-    if (!sc) return -1;
+int fc_stop(FrameCapture *fc) {
+    if (!fc) return -1;
     
-    sc->capturing = false;
-    printf("Stopped capturing from '%s'\n", sc->output_name);
+    fc->capturing = false;
+    printf("Stopped capturing from '%s'\n", fc->output_name);
     return 0;
 }
 
 // Get current frame (returns the XImage*)
-XImage* sc_get_frame(SimpleCapture *sc) {
-    return sc ? sc->current_frame : NULL;
+XImage* fc_get_frame(FrameCapture *fc) {
+    return fc ? fc->current_frame : NULL;
 }
 
 // Check if new frame is ready
-bool sc_has_new_frame(SimpleCapture *sc) {
-    return sc ? sc->frame_ready : false;
+bool fc_has_new_frame(FrameCapture *fc) {
+    return fc ? fc->frame_ready : false;
 }
 
 // Mark frame as processed
-void sc_mark_frame_processed(SimpleCapture *sc) {
-    if (sc) sc->frame_ready = false;
+void fc_mark_frame_processed(FrameCapture *fc) {
+    if (fc) fc->frame_ready = false;
 }
 
-// Save frame as PPM (simple RGB format)
-int sc_save_frame_ppm(SimpleCapture *sc, const char *filename) {
-    if (!sc || !sc->current_frame || !filename) return -1;
+// Save frame as PPM (simple RGB format) in captures directory
+int fc_save_frame_ppm(FrameCapture *fc, const char *filename) {
+    if (!fc || !fc->current_frame || !filename) return -1;
     
-    XImage *img = sc->current_frame;
-    FILE *fp = fopen(filename, "wb");
+    XImage *img = fc->current_frame;
+    
+    // Create full path with captures directory
+    char full_path[512];
+    snprintf(full_path, sizeof(full_path), "captures/%s", filename);
+    
+    FILE *fp = fopen(full_path, "wb");
     if (!fp) {
         perror("Failed to open file for writing");
         return -1;
@@ -179,22 +207,22 @@ int sc_save_frame_ppm(SimpleCapture *sc, const char *filename) {
     }
     
     fclose(fp);
-    printf("Saved frame to %s (%dx%d)\n", filename, img->width, img->height);
+    printf("Saved frame to %s (%dx%d)\n", full_path, img->width, img->height);
     return 0;
 }
 
 // Print detailed frame and capture info
-void sc_print_frame_info(SimpleCapture *sc) {
-    if (!sc) return;
+void fc_print_frame_info(FrameCapture *fc) {
+    if (!fc) return;
     
-    printf("Capture Status for '%s':\n", sc->output_name);
-    printf("  Screen region: %dx%d+%d+%d\n", sc->width, sc->height, sc->x, sc->y);
-    printf("  Target FPS: %d (interval: %ld μs)\n", sc->target_fps, sc->frame_interval_us);
-    printf("  Capturing: %s\n", sc->capturing ? "YES" : "NO");
-    printf("  Frame ready: %s\n", sc->frame_ready ? "YES" : "NO");
+    printf("Capture Status for '%s':\n", fc->output_name);
+    printf("  Screen region: %dx%d+%d+%d\n", fc->width, fc->height, fc->x, fc->y);
+    printf("  Target FPS: %d (interval: %ld μs)\n", fc->target_fps, fc->frame_interval_us);
+    printf("  Capturing: %s\n", fc->capturing ? "YES" : "NO");
+    printf("  Frame ready: %s\n", fc->frame_ready ? "YES" : "NO");
     
-    if (sc->current_frame) {
-        XImage *img = sc->current_frame;
+    if (fc->current_frame) {
+        XImage *img = fc->current_frame;
         printf("  Current frame:\n");
         printf("    Dimensions: %dx%d\n", img->width, img->height);
         printf("    Depth: %d bits\n", img->depth);
@@ -209,15 +237,15 @@ void sc_print_frame_info(SimpleCapture *sc) {
 }
 
 // Cleanup all resources
-void sc_cleanup(SimpleCapture *sc) {
-    if (!sc) return;
+void fc_cleanup(FrameCapture *fc) {
+    if (!fc) return;
     
-    sc_stop(sc);
+    fc_stop(fc);
     
-    if (sc->current_frame) {
-        XDestroyImage(sc->current_frame);  // This also frees the image data
-        sc->current_frame = NULL;
+    if (fc->current_frame) {
+        XDestroyImage(fc->current_frame);  // This also frees the image data
+        fc->current_frame = NULL;
     }
     
-    free(sc);
+    free(fc);
 }

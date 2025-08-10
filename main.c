@@ -5,6 +5,7 @@
 #include "display_manager.h"
 #include "mode_manager.h"
 #include "frame_capture.h"  
+#include "udp_streamer.h"
 #include <signal.h>
 
 static volatile bool keep_running = true;
@@ -25,7 +26,8 @@ void print_usage(const char *program_name) {
     printf("  --status OUTPUT           Show current status of output\n");
     printf("  --position X,Y            Set position when enabling output (default: 0,0)\n");
     printf("  --reduced-blanking        Use reduced blanking for CVT (with --create-mode)\n");
-    printf("  --capture OUTPUT          Capture frames from output\n");
+    printf("  --stream OUTPUT           Stream frames from output via UDP\n");
+    printf("  --port PORT               UDP port for streaming (default: 8888, use with --stream)\n");
     printf("  --fps FPS                 Set capture frame rate (default: 30, use with --capture)\n");
     printf("  --help                    Show this help\n");
     printf("\nExamples:\n");
@@ -149,6 +151,11 @@ int main(int argc, char *argv[]) {
     bool show_status = false;
     bool reduced_blanking = false;
 
+    // UDP streaming variables
+    bool enable_stream = false;
+    char *stream_output = NULL;
+    int stream_port = 8888;
+
     // Frame capture variables
     bool enable_capture = false;
     char *capture_output = NULL;
@@ -201,12 +208,14 @@ int main(int argc, char *argv[]) {
             status_output = argv[++i];
         } 
         
-        else if (strcmp(argv[i], "--capture") == 0 && i + 1 < argc) {
-            enable_capture = true;
-            capture_output = argv[++i];
+        else if (strcmp(argv[i], "--stream") == 0 && i + 1 < argc) {
+            enable_stream = true;
+            stream_output = argv[++i];
+        } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+            stream_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--fps") == 0 && i + 1 < argc) {
             capture_fps = atoi(argv[++i]);
-        
+
         } else if (strcmp(argv[i], "--position") == 0 && i + 1 < argc) {
             if (parse_position(argv[++i], &pos_x, &pos_y) != 0) {
                 return 1;
@@ -333,49 +342,75 @@ int main(int argc, char *argv[]) {
         print_output_status(dm, status_output);
     }
         
-    // Frame capture (if requested)
-    if (enable_capture && capture_output) {
-        printf("\n=== Frame Capture ===\n");
+    // UDP streaming (if requested)
+    if (enable_stream && stream_output) {
+        printf("\n=== UDP Frame Streaming ===\n");
         
-        FrameCapture *fc = fc_init(dm, capture_output, capture_fps);
+        FrameCapture *fc = fc_init(dm, stream_output, capture_fps);
         if (!fc) {
             fprintf(stderr, "Failed to initialize capture\n");
             dm_cleanup(dm);
             return 1;
         }
         
-        fc_print_frame_info(fc);
-        
-        if (fc_start(fc) != 0) {
+        // Initialize UDP streamer
+        UDPStreamer *streamer = udp_init(stream_port);
+        if (!streamer) {
+            fprintf(stderr, "Failed to initialize UDP streamer\n");
             fc_cleanup(fc);
             dm_cleanup(dm);
             return 1;
         }
         
-        signal(SIGINT, signal_handler);
-        printf("Capturing... Press Ctrl+C to stop\n");
-        printf("Frames will be saved to ./captures/ directory\n");
+        udp_print_status(streamer);
+        fc_print_frame_info(fc);
         
-        // Simple capture loop
-        int frame_count = 0;
+        if (fc_start(fc) != 0) {
+            udp_cleanup(streamer);
+            fc_cleanup(fc);
+            dm_cleanup(dm);
+            return 1;
+        }
+        
+        // Wait for client connection
+        if (udp_wait_for_client(streamer) != 0) {
+            udp_cleanup(streamer);
+            fc_cleanup(fc);
+            dm_cleanup(dm);
+            return 1;
+        }
+        
+        // Send frame info to client
+        udp_send_frame_info(streamer, fc->width, fc->height);
+        
+        signal(SIGINT, signal_handler);
+        printf("Streaming... Press Ctrl+C to stop\n");
+        
+        // Streaming loop
+        uint32_t frame_id = 0;
+        int frames_sent = 0;
+        
         while (keep_running) {
             int result = fc_capture_frame(fc);
             
             if (result == 1) {  // New frame captured
-                frame_count++;
-                printf("Frame %d\r", frame_count);
-                fflush(stdout);
-                
-                // Save every 60th frame as example
-                if (frame_count % 60 == 0) {
-                    char filename[64];
-                    snprintf(filename, sizeof(filename), "capture_%04d.ppm", frame_count);
-                    fc_save_frame_ppm(fc, filename);
+                XImage *frame = fc_get_frame(fc);
+                if (frame) {
+                    if (udp_send_frame(streamer, frame, frame_id) == 0) {
+                        frames_sent++;
+                        frame_id++;
+                        
+                        if (frames_sent % 60 == 0) {
+                            printf("Sent %d frames\n", frames_sent);
+                        }
+                    } else {
+                        fprintf(stderr, "Failed to send frame %d\n", frame_id);
+                    }
+                    
+                    fc_mark_frame_processed(fc);
                 }
-                
-                fc_mark_frame_processed(fc);
             } else if (result < 0) {
-                fprintf(stderr, "\nCapture failed\n");
+                fprintf(stderr, "Capture failed\n");
                 break;
             }
             
@@ -383,7 +418,8 @@ int main(int argc, char *argv[]) {
             usleep(5000); // 5ms
         }
         
-        printf("\nCaptured %d frames\n", frame_count);
+        printf("\nStreamed %d frames\n", frames_sent);
+        udp_cleanup(streamer);
         fc_cleanup(fc);
     }
     

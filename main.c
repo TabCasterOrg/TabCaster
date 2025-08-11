@@ -27,7 +27,7 @@ void print_usage(const char *program_name) {
     printf("  --position X,Y            Set position when enabling output (default: 0,0)\n");
     printf("  --reduced-blanking        Use reduced blanking for CVT (with --create-mode)\n");
     printf("  --stream OUTPUT           Stream frames from output via UDP\n");
-    printf("  --port PORT               UDP port for streaming (default: 8888, use with --stream)\n");
+    printf("  --port PORT               UDP port for streaming (default: 23532, use with --stream)\n");
     printf("  --fps FPS                 Set capture frame rate (default: 30, use with --capture)\n");
     printf("  --help                    Show this help\n");
     printf("\nExamples:\n");
@@ -154,7 +154,7 @@ int main(int argc, char *argv[]) {
     // UDP streaming variables
     bool enable_stream = false;
     char *stream_output = NULL;
-    int stream_port = 8888;
+    int stream_port = 23532;
 
     // Frame capture variables
     bool enable_capture = false;

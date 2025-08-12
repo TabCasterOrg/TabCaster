@@ -26,6 +26,7 @@ void print_usage(const char *program_name) {
     printf("  --status OUTPUT           Show current status of output\n");
     printf("  --position X,Y            Set position when enabling output (default: 0,0)\n");
     printf("  --reduced-blanking        Use reduced blanking for CVT (with --create-mode)\n");
+    printf("  --test-display OUTPUT WxH@R  Create mode, add to output, and enable (all-in-one)\n");
     printf("  --stream OUTPUT           Stream frames from output via UDP\n");
     printf("  --port PORT               UDP port for streaming (default: 23532, use with --stream)\n");
     printf("  --fps FPS                 Set capture frame rate (default: 30, use with --capture)\n");
@@ -38,9 +39,14 @@ void print_usage(const char *program_name) {
     printf("  %s --disable HDMI-1\n", program_name);
     printf("  %s --list-modes HDMI-1\n", program_name);
     printf("  %s --status HDMI-1\n", program_name);
+    printf("  %s --test-display HDMI-1 2336x1080@60 --position 1920,0\n", program_name);
+    printf("  %s --test-display DP-2 3440x1440@100 --reduced-blanking\n", program_name);
     printf("  %s --capture HDMI-1\n", program_name);
     printf("  %s --fps 60\n", program_name);
     printf("\nCapture files are saved in ./captures/ directory\n");
+    printf("\nTest Display:\n");
+    printf("  --test-display creates a mode, adds it to the output, and enables it in one step.\n");
+    printf("  Perfect for quickly setting up virtual displays for testing.\n");
 }
 
 // Parse mode specification (WxH@R format)
@@ -134,6 +140,101 @@ void print_output_status(DisplayManager *dm, const char *output_name) {
     printf("\n");
 }
 
+// Test display functionality - create mode, add to output, and enable
+int setup_test_display(DisplayManager *dm, const char *output_name, const char *mode_spec, 
+                      int pos_x, int pos_y, bool reduced_blanking) {
+    if (!dm || !output_name || !mode_spec) {
+        fprintf(stderr, "Invalid parameters for test display setup\n");
+        return -1;
+    }
+    
+    // Parse mode specification
+    unsigned int width, height;
+    double refresh_rate;
+    
+    if (parse_mode_spec(mode_spec, &width, &height, &refresh_rate) != 0) {
+        return -1;
+    }
+    
+    printf("\n=== Setting up test display '%s' ===\n", output_name);
+    printf("Mode specification: %ux%u @ %.2f Hz%s\n", 
+           width, height, refresh_rate,
+           reduced_blanking ? " (reduced blanking)" : "");
+    printf("Position: %d,%d\n", pos_x, pos_y);
+    
+    // Step 1: Create CVT mode
+    printf("\nStep 1: Creating CVT mode...\n");
+    RRMode mode_id = mode_create_cvt(dm, width, height, refresh_rate, reduced_blanking);
+    if (mode_id == 0) {
+        fprintf(stderr, "Failed to create CVT mode\n");
+        return -1;
+    }
+    printf("✓ Mode created successfully with ID: %lu\n", mode_id);
+    
+    // Step 2: Add mode to output
+    printf("\nStep 2: Adding mode to output '%s'...\n", output_name);
+    if (mode_add_to_output(dm, output_name, mode_id) != 0) {
+        fprintf(stderr, "Failed to add mode to output '%s'\n", output_name);
+        fprintf(stderr, "Cleaning up: deleting created mode\n");
+        mode_delete_from_xrandr(dm, mode_id);
+        return -1;
+    }
+    printf("✓ Mode added to output successfully\n");
+    
+    // Step 3: Enable output with the new mode
+    printf("\nStep 3: Enabling output with new mode...\n");
+    if (mode_enable_output_with_mode_id(dm, output_name, mode_id, pos_x, pos_y) != 0) {
+        fprintf(stderr, "Failed to enable output '%s' with mode ID %lu\n", output_name, mode_id);
+        fprintf(stderr, "Cleaning up: removing mode from output and deleting\n");
+        mode_remove_from_output(dm, output_name, mode_id);
+        mode_delete_from_xrandr(dm, mode_id);
+        return -1;
+    }
+    printf("✓ Output enabled successfully\n");
+    
+    
+    // Refresh screen information to get updated status
+    dm_get_screens(dm);
+    
+    // Find and display the configured output
+    ScreenInfo *configured_screen = NULL;
+    for (int i = 0; i < dm->screen_count; i++) {
+        if (strcmp(dm->screens[i].name, output_name) == 0) {
+            configured_screen = &dm->screens[i];
+            break;
+        }
+    }
+    
+    if (configured_screen) {
+        printf("✓ Test display setup completed successfully!\n");
+        printf("\nTest display status:\n");
+        printf("  Output: %s\n", configured_screen->name);
+        printf("  Resolution: %ux%u\n", configured_screen->width, configured_screen->height);
+        printf("  Position: %d,%d\n", configured_screen->x, configured_screen->y);
+        printf("  Mode ID: %lu\n", mode_id);
+        
+        printf("\nYou can now:\n");
+        printf("  - Stream from this display: %s --stream %s\n", "tabcaster", output_name);
+        printf("  - Check status: %s --status %s\n", "tabcaster", output_name);
+        printf("  - Disable when done: %s --disable %s\n", "tabcaster", output_name);
+        printf("  - Remove mode: %s --remove-mode %s %lu\n", "tabcaster", output_name, mode_id);
+        printf("  - Delete mode: %s --delete-mode %lu\n", "tabcaster", mode_id);
+        
+        return 0;
+    } else {
+        fprintf(stderr, "Setup appears to have not configured\n");
+        
+        // Still show the mode ID for manual cleanup if needed
+        printf("\nCreated mode ID: %lu\n", mode_id);
+        printf("If you need to clean up manually:\n");
+        printf("  %s --disable %s\n", "tabcaster", output_name);
+        printf("  %s --remove-mode %s %lu\n", "tabcaster", output_name, mode_id);
+        printf("  %s --delete-mode %lu\n", "tabcaster", mode_id);
+        
+        return 0; // Don't treat as failure 
+    }
+}
+
 // Main entry point with command line argument parsing
 int main(int argc, char *argv[]) {
     printf("Tabcaster - C Version with Output Management\n");
@@ -150,6 +251,7 @@ int main(int argc, char *argv[]) {
     bool disable_output = false;
     bool show_status = false;
     bool reduced_blanking = false;
+    bool test_display = false;
 
     // UDP streaming variables
     bool enable_stream = false;
@@ -166,6 +268,8 @@ int main(int argc, char *argv[]) {
     char *mode_name = NULL;
     char *status_output = NULL;
     char *list_modes_output = NULL;
+    char *test_output_name = NULL;
+    char *test_mode_spec = NULL;
     RRMode mode_id = 0;
     int pos_x = 0, pos_y = 0;
     
@@ -206,16 +310,17 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--status") == 0 && i + 1 < argc) {
             show_status = true;
             status_output = argv[++i];
-        } 
-        
-        else if (strcmp(argv[i], "--stream") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "--test-display") == 0 && i + 2 < argc) {
+            test_display = true;
+            test_output_name = argv[++i];
+            test_mode_spec = argv[++i];
+        } else if (strcmp(argv[i], "--stream") == 0 && i + 1 < argc) {
             enable_stream = true;
             stream_output = argv[++i];
         } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             stream_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--fps") == 0 && i + 1 < argc) {
             capture_fps = atoi(argv[++i]);
-
         } else if (strcmp(argv[i], "--position") == 0 && i + 1 < argc) {
             if (parse_position(argv[++i], &pos_x, &pos_y) != 0) {
                 return 1;
@@ -340,6 +445,15 @@ int main(int argc, char *argv[]) {
     
     if (show_status) {
         print_output_status(dm, status_output);
+    }
+    
+    // Test display setup (new functionality)
+    if (test_display) {
+        if (setup_test_display(dm, test_output_name, test_mode_spec, pos_x, pos_y, reduced_blanking) != 0) {
+            fprintf(stderr, "Test display setup failed\n");
+            dm_cleanup(dm);
+            return 1;
+        }
     }
         
     // UDP streaming (if requested)

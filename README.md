@@ -85,6 +85,28 @@ Examples:
   ./build/tabcaster --remove-mode HDMI1 2336x1080_60.00
 ```
 
+**Debug Build Compiling:**
+```bash
+gcc -g -O0 -Wall -Wextra -o tabcaster main.c display_manager.c mode_manager.c frame_capture.c udp_streamer.c
+```
+Then you can run the program under GDB like:
+
+```
+gdb ./build/tabcaster
+
+```
+
+Inside GDB:
+
+```
+run --status <output>
+```
+
+Or, in one command:
+
+```
+gdb --args ./build/tabcaster arg1 arg2 arg3
+```
 ## Troubleshooting
 
 **"Cannot open X display" error:**

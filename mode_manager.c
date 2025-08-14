@@ -41,14 +41,14 @@ static void convert_libxcvt_to_xrr(const struct libxcvt_mode_info *cvt_mode, XRR
     xrr_mode->nameLength = strlen(mode_name);
 }
 
-// Find an available CRTC that's not currently in use
-static RRCrtc find_available_crtc(DisplayManager *dm) {
+// Find a suitable CRTC for the given output (allows reuse of CRTCs)
+static RRCrtc find_suitable_crtc(DisplayManager *dm, RROutput target_output) {
+    // First, try to find an unused CRTC
     for (int i = 0; i < dm->resources->ncrtc; i++) {
         RRCrtc crtc = dm->resources->crtcs[i];
         XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(dm->display, dm->resources, crtc);
         
         if (crtc_info) {
-            // CRTC is available if it has no outputs assigned
             bool available = (crtc_info->noutput == 0);
             XRRFreeCrtcInfo(crtc_info);
             
@@ -57,7 +57,26 @@ static RRCrtc find_available_crtc(DisplayManager *dm) {
             }
         }
     }
-    return None; // No available CRTC found
+    
+    // If no unused CRTC, find one that can support this output
+    // Check if any CRTC can be assigned to this output
+    XRROutputInfo *output_info = XRRGetOutputInfo(dm->display, dm->resources, target_output);
+    if (output_info && output_info->ncrtc > 0) {
+        // Use the first compatible CRTC (we'll reconfigure it)
+        RRCrtc suitable_crtc = output_info->crtcs[0];
+        XRRFreeOutputInfo(output_info);
+        return suitable_crtc;
+    }
+    
+    if (output_info) XRRFreeOutputInfo(output_info);
+    
+    // Fallback: use any CRTC (this might fail, but worth trying)
+    if (dm->resources->ncrtc > 0) {
+        printf("Warning: Using fallback CRTC assignment\n");
+        return dm->resources->crtcs[0];
+    }
+    
+    return None;
 }
 
 // Find output ID by name
@@ -221,7 +240,7 @@ RRMode mode_find_by_name(DisplayManager *dm, const char *mode_name) {
     return 0; // Mode not found
 }
 
-// Enable output with a specific mode (mimics xrandr --output HDMI-1 --mode 2336x1080_60.00)
+// Enable output with a specific mode (works regardless of connection status)
 int mode_enable_output_with_mode(DisplayManager *dm, const char *output_name, 
                                  const char *mode_name, int x_pos, int y_pos) {
     if (!dm || !output_name || !mode_name) return -1;
@@ -240,12 +259,14 @@ int mode_enable_output_with_mode(DisplayManager *dm, const char *output_name,
         return -1;
     }
     
-    // Find an available CRTC
-    RRCrtc crtc = find_available_crtc(dm);
+    // Find a suitable CRTC (removed connection requirement)
+    RRCrtc crtc = find_suitable_crtc(dm, output);
     if (crtc == None) {
-        fprintf(stderr, "No available CRTC found for output '%s'\n", output_name);
+        fprintf(stderr, "No suitable CRTC found for output '%s'\n", output_name);
         return -1;
     }
+    
+    printf("Using CRTC %lu for output '%s'\n", crtc, output_name);
     
     // Configure the CRTC with the output and mode
     Status result = XRRSetCrtcConfig(dm->display, dm->resources, crtc, 
@@ -265,7 +286,7 @@ int mode_enable_output_with_mode(DisplayManager *dm, const char *output_name,
     }
 }
 
-// Enable output with mode ID (alternative version)
+// Enable output with mode ID (alternative version, works regardless of connection status)
 int mode_enable_output_with_mode_id(DisplayManager *dm, const char *output_name, 
                                    RRMode mode_id, int x_pos, int y_pos) {
     if (!dm || !output_name || mode_id == 0) return -1;
@@ -276,11 +297,13 @@ int mode_enable_output_with_mode_id(DisplayManager *dm, const char *output_name,
         return -1;
     }
     
-    RRCrtc crtc = find_available_crtc(dm);
+    RRCrtc crtc = find_suitable_crtc(dm, output);
     if (crtc == None) {
-        fprintf(stderr, "No available CRTC found for output '%s'\n", output_name);
+        fprintf(stderr, "No suitable CRTC found for output '%s'\n", output_name);
         return -1;
     }
+    
+    printf("Using CRTC %lu for output '%s'\n", crtc, output_name);
     
     Status result = XRRSetCrtcConfig(dm->display, dm->resources, crtc, 
                                     CurrentTime, x_pos, y_pos, mode_id, 

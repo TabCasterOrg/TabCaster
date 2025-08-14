@@ -320,6 +320,36 @@ if (mode_add_to_output(dm, "HDMI-1", mode_id) == 0) {
 - `x_pos`: X position in virtual desktop
 - `y_pos`: Y position in virtual desktop
 
+**XRRSetCrtcConfig**
+
+```XRRSetCrtcConfig(Display *dpy, XRRScreenResources *res, RRCrtc crtc, Time timestamp, int x, int y, RRMode mode, Rotation rotation, RROutput *outputs, int noutputs)```
+
+It tells X11: “For this specific CRTC (display controller), enable this mode, at this position, with these outputs.” its part of the Xrandr library
+- dm->display
+ The X11 display connection (Display *).
+
+- dm->resources
+→ The set of RandR resources (available CRTCs, modes, outputs).
+
+- crtc
+→ The display controller to configure (chosen earlier with find_suitable_crtc).
+
+- CurrentTime
+→ Timestamp for the config change. Using CurrentTime means “apply it now.”
+
+- x_pos / y_pos
+→ Position of the output in the virtual screen coordinate space (important for multi-monitor layouts).
+
+- mode
+→ The mode ID (e.g., your newly created 1920x1080@60Hz) to set.
+
+- RR_Rotate_0
+→ No rotation; screen is upright.
+
+- &output
+→ Pointer to the output(s) that this CRTC should drive 
+-1
+→ Number of outputs in the list (just 1 here).
 **Returns**:
 - `0`: Success
 - `-1`: Error (output/mode not found, no available CRTC)

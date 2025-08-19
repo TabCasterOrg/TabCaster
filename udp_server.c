@@ -1,0 +1,288 @@
+#include "udp_server.h"
+#include "mode_manager.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+
+// Initialize UDP server
+UDPServer* udp_server_init(int port, DisplayManager *dm) {
+    if (!dm) return NULL;
+    
+    UDPServer *server = calloc(1, sizeof(UDPServer));
+    if (!server) return NULL;
+    
+    server->port = port;
+    server->dm = dm;
+    server->client.address_len = sizeof(server->client.address);
+    server->client.state = CLIENT_STATE_DISCONNECTED;
+    
+    // Create UDP socket
+    server->socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (server->socket_fd < 0) {
+        perror("Socket creation failed");
+        free(server);
+        return NULL;
+    }
+    
+    // Enable address reuse
+    int opt = 1;
+    if (setsockopt(server->socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt failed");
+        close(server->socket_fd);
+        free(server);
+        return NULL;
+    }
+    
+    // Configure server address
+    memset(&server->server_addr, 0, sizeof(server->server_addr));
+    server->server_addr.sin_family = AF_INET;
+    server->server_addr.sin_addr.s_addr = INADDR_ANY;
+    server->server_addr.sin_port = htons(port);
+    
+    // Bind socket
+    if (bind(server->socket_fd, (struct sockaddr*)&server->server_addr, 
+             sizeof(server->server_addr)) < 0) {
+        perror("Bind failed");
+        close(server->socket_fd);
+        free(server);
+        return NULL;
+    }
+    
+    printf("UDP server initialized on port %d\n", port);
+    return server;
+}
+
+// Send response to client
+int udp_server_send_response(UDPServer *server, const char *message) {
+    if (!server || !message || !server->client_connected) return -1;
+    
+    ssize_t bytes_sent = sendto(server->socket_fd, message, strlen(message), 0,
+                               (struct sockaddr*)&server->client.address,
+                               server->client.address_len);
+    
+    if (bytes_sent < 0) {
+        perror("Failed to send response");
+        return -1;
+    }
+    
+    printf("Sent: %s\n", message);
+    return 0;
+}
+
+// Parse resolution message: "RESOLUTION:1920:1080:60"
+int udp_server_parse_resolution(const char *message, unsigned int *width, 
+                               unsigned int *height, double *refresh_rate) {
+    if (!message || !width || !height || !refresh_rate) return -1;
+    
+    if (strncmp(message, "RESOLUTION:", 11) != 0) return -1;
+    
+    const char *data = message + 11;  // Skip "RESOLUTION:"
+    int parsed = sscanf(data, "%u:%u:%lf", width, height, refresh_rate);
+    
+    if (parsed != 3) {
+        fprintf(stderr, "Invalid resolution format: %s\n", message);
+        return -1;
+    }
+    
+    // Basic validation
+    if (*width < 640 || *width > 32767 || *height < 480 || *height > 32767) {
+        fprintf(stderr, "Invalid resolution: %ux%u\n", *width, *height);
+        return -1;
+    }
+    
+    if (*refresh_rate <= 0 || *refresh_rate > 240) {
+        fprintf(stderr, "Invalid refresh rate: %.2f\n", *refresh_rate);
+        return -1;
+    }
+    
+    return 0;
+}
+
+// Handle complete handshake process
+int udp_server_handle_handshake(UDPServer *server) {
+    if (!server) return -1;
+    
+    char buffer[UDP_BUFFER_SIZE];
+    
+    while (server->client.state != CLIENT_STATE_DISPLAY_READY) {
+        // Receive message from client
+        ssize_t bytes_received = recvfrom(server->socket_fd, buffer, sizeof(buffer) - 1, 0,
+                                         (struct sockaddr*)&server->client.address,
+                                         &server->client.address_len);
+        
+        if (bytes_received < 0) {
+            perror("Failed to receive from client");
+            return -1;
+        }
+        
+        buffer[bytes_received] = '\0';
+        printf("Received: %s\n", buffer);
+        
+        switch (server->client.state) {
+            case CLIENT_STATE_DISCONNECTED:
+                if (strcmp(buffer, "HELLO") == 0) {
+                    server->client_connected = true;
+                    server->client.state = CLIENT_STATE_CONNECTED;
+                    
+                    if (udp_server_send_response(server, "HELLO_ACK") != 0) {
+                        return -1;
+                    }
+                    
+                    printf("Client connected: %s:%d\n",
+                           inet_ntoa(server->client.address.sin_addr),
+                           ntohs(server->client.address.sin_port));
+                } else {
+                    printf("Invalid handshake: %s\n", buffer);
+                    return -1;
+                }
+                break;
+                
+            case CLIENT_STATE_CONNECTED:
+                if (udp_server_parse_resolution(buffer, &server->client.width,
+                                               &server->client.height,
+                                               &server->client.refresh_rate) == 0) {
+                    server->client.state = CLIENT_STATE_RESOLUTION_SET;
+                    
+                    printf("Client resolution: %ux%u @ %.2f Hz\n",
+                           server->client.width, server->client.height,
+                           server->client.refresh_rate);
+                    
+                    if (udp_server_send_response(server, "RESOLUTION_ACK") != 0) {
+                        return -1;
+                    }
+                    
+                    // Immediately try to create display
+                    return 0; // Let caller handle display creation
+                } else {
+                    udp_server_send_response(server, "RESOLUTION_ERROR:Invalid format");
+                    return -1;
+                }
+                break;
+                
+            default:
+                printf("Unexpected message in state %d: %s\n", server->client.state, buffer);
+                break;
+        }
+    }
+    
+    return 0;
+}
+
+// Create display for client using existing display/mode management
+int udp_server_create_display_for_client(UDPServer *server, const char *target_output) {
+    if (!server || !target_output || server->client.state != CLIENT_STATE_RESOLUTION_SET) {
+        return -1;
+    }
+    
+    ClientInfo *client = &server->client;
+    
+    printf("\n=== Creating display for client ===\n");
+    printf("Target output: %s\n", target_output);
+    printf("Resolution: %ux%u @ %.2f Hz\n", client->width, client->height, client->refresh_rate);
+    
+    // Step 1: Create CVT mode using existing mode manager
+    RRMode mode_id = mode_create_cvt(server->dm, client->width, client->height,
+                                    client->refresh_rate, client->reduced_blanking);
+    
+    if (mode_id == 0) {
+        udp_server_send_response(server, "DISPLAY_ERROR:Failed to create mode");
+        return -1;
+    }
+    
+    // Step 2: Add mode to output
+    if (mode_add_to_output(server->dm, target_output, mode_id) != 0) {
+        mode_delete_from_xrandr(server->dm, mode_id); // Cleanup
+        udp_server_send_response(server, "DISPLAY_ERROR:Failed to add mode to output");
+        return -1;
+    }
+    
+    // Step 3: Enable output with mode
+    if (mode_enable_output_with_mode_id(server->dm, target_output, mode_id,
+                                       client->x_pos, client->y_pos) != 0) {
+        mode_remove_from_output(server->dm, target_output, mode_id);
+        mode_delete_from_xrandr(server->dm, mode_id);
+        udp_server_send_response(server, "DISPLAY_ERROR:Failed to enable output");
+        return -1;
+    }
+    
+    // Store successful configuration
+    strncpy(client->output_name, target_output, sizeof(client->output_name) - 1);
+    client->mode_id = mode_id;
+    client->state = CLIENT_STATE_DISPLAY_READY;
+    
+    // Refresh display manager state
+    dm_get_screens(server->dm);
+    
+    printf("✓ Display created successfully!\n");
+    
+    // Send success response with display info
+    return udp_server_send_display_info(server);
+}
+
+// Send display info to client
+int udp_server_send_display_info(UDPServer *server) {
+    if (!server || server->client.state != CLIENT_STATE_DISPLAY_READY) return -1;
+    
+    ClientInfo *client = &server->client;
+    char response[256];
+    
+    snprintf(response, sizeof(response), "DISPLAY_READY:%s:%ux%u:%d:%d",
+             client->output_name, client->width, client->height,
+             client->x_pos, client->y_pos);
+    
+    return udp_server_send_response(server, response);
+}
+
+// Wait for client and complete handshake
+int udp_server_wait_for_client(UDPServer *server) {
+    if (!server) return -1;
+    
+    printf("Waiting for client connection on port %d...\n", server->port);
+    return udp_server_handle_handshake(server);
+}
+
+// Get client info
+ClientInfo* udp_server_get_client(UDPServer *server) {
+    return server ? &server->client : NULL;
+}
+
+// Print server status
+void udp_server_print_status(UDPServer *server) {
+    if (!server) return;
+    
+    printf("UDP Server Status:\n");
+    printf("  Port: %d\n", server->port);
+    printf("  Socket FD: %d\n", server->socket_fd);
+    printf("  Client connected: %s\n", server->client_connected ? "YES" : "NO");
+    
+    if (server->client_connected) {
+        ClientInfo *client = &server->client;
+        printf("  Client: %s:%d\n",
+               inet_ntoa(client->address.sin_addr),
+               ntohs(client->address.sin_port));
+        printf("  State: %d\n", client->state);
+        
+        if (client->state >= CLIENT_STATE_RESOLUTION_SET) {
+            printf("  Resolution: %ux%u @ %.2f Hz\n",
+                   client->width, client->height, client->refresh_rate);
+        }
+        
+        if (client->state >= CLIENT_STATE_DISPLAY_READY) {
+            printf("  Output: %s (Mode ID: %lu)\n", client->output_name, client->mode_id);
+            printf("  Position: %d,%d\n", client->x_pos, client->y_pos);
+        }
+    }
+}
+
+// Cleanup resources
+void udp_server_cleanup(UDPServer *server) {
+    if (!server) return;
+    
+    if (server->socket_fd >= 0) {
+        close(server->socket_fd);
+    }
+    
+    free(server);
+}

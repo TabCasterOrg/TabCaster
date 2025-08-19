@@ -5,7 +5,8 @@
 #include "display_manager.h"
 #include "mode_manager.h"
 #include "frame_capture.h"  
-#include "udp_streamer.h"
+#include "udp_server.h"
+#include "frame_streamer.h"
 #include <signal.h>
 
 static volatile bool keep_running = true;
@@ -27,9 +28,9 @@ void print_usage(const char *program_name) {
     printf("  --position X,Y            Set position when enabling output (default: 0,0)\n");
     printf("  --reduced-blanking        Use reduced blanking for CVT (with --create-mode)\n");
     printf("  --test-display OUTPUT WxH@R  Create mode, add to output, and enable (all-in-one)\n");
-    printf("  --stream OUTPUT           Stream frames from output via UDP\n");
+    printf("  --stream OUTPUT           Stream frames from output via UDP (with resolution exchange)\n");
     printf("  --port PORT               UDP port for streaming (default: 23532, use with --stream)\n");
-    printf("  --fps FPS                 Set capture frame rate (default: 30, use with --capture)\n");
+    printf("  --fps FPS                 Set capture frame rate (default: 30, use with --stream)\n");
     printf("  --help                    Show this help\n");
     printf("\nExamples:\n");
     printf("  %s --create-mode 2336x1080@60\n", program_name);
@@ -41,12 +42,10 @@ void print_usage(const char *program_name) {
     printf("  %s --status HDMI-1\n", program_name);
     printf("  %s --test-display HDMI-1 2336x1080@60 --position 1920,0\n", program_name);
     printf("  %s --test-display DP-2 3440x1440@100 --reduced-blanking\n", program_name);
-    printf("  %s --capture HDMI-1\n", program_name);
-    printf("  %s --fps 60\n", program_name);
-    printf("\nCapture files are saved in ./captures/ directory\n");
-    printf("\nTest Display:\n");
-    printf("  --test-display creates a mode, adds it to the output, and enables it in one step.\n");
-    printf("  Perfect for quickly setting up virtual displays for testing.\n");
+    printf("  %s --stream HDMI-1 --fps 60\n", program_name);
+    printf("\nStreaming:\n");
+    printf("  --stream creates a display based on client resolution and streams frames.\n");
+    printf("  The client sends its resolution during handshake.\n");
 }
 
 // Parse mode specification (WxH@R format)
@@ -89,7 +88,7 @@ int parse_position(const char *pos_str, int *x, int *y) {
     return 0;
 }
 
-// Signal handler to stop capturing on Ctrl+C
+// Signal handler to stop operations on Ctrl+C
 void signal_handler(int sig) {
     (void)sig; // Suppress unused parameter warning
     keep_running = false;
@@ -235,6 +234,68 @@ int setup_test_display(DisplayManager *dm, const char *output_name, const char *
     }
 }
 
+// Stream with resolution exchange with client
+int stream_with_resolution_exchange(DisplayManager *dm, const char *output_name, 
+                                   int port, int fps, int pos_x, int pos_y, 
+                                   bool reduced_blanking) {
+    if (!dm || !output_name) {
+        fprintf(stderr, "Invalid parameters for streaming\n");
+        return -1;
+    }
+    
+    printf("\n=== UDP Streaming ===\n");
+    printf("Output: %s\n", output_name);
+    printf("Port: %d\n", port);
+    printf("FPS: %d\n", fps);
+    printf("Position: %d,%d\n", pos_x, pos_y);
+    
+    // Step 1: Initialize UDP server
+    UDPServer *server = udp_server_init(port, dm);
+    if (!server) {
+        fprintf(stderr, "Failed to initialize UDP server\n");
+        return -1;
+    }
+    
+    udp_server_print_status(server);
+    
+    // Step 2: Wait for client and complete handshake (including resolution exchange)
+    printf("\n=== Handshake Phase ===\n");
+    if (udp_server_wait_for_client(server) != 0) {
+        fprintf(stderr, "Handshake failed\n");
+        udp_server_cleanup(server);
+        return -1;
+    }
+    
+    // Step 3: Create display based on client resolution
+    printf("\n=== Display Creation Phase ===\n");
+    if (udp_server_create_display_for_client(server, output_name) != 0) {
+        fprintf(stderr, "Failed to create display for client\n");
+        udp_server_cleanup(server);
+        return -1;
+    }
+    
+    // Step 4: Initialize frame streamer
+    printf("\n=== Streaming Setup Phase ===\n");
+    FrameStreamer *streamer = frame_streamer_init(server, output_name, fps);
+    if (!streamer) {
+        fprintf(stderr, "Failed to initialize frame streamer\n");
+        udp_server_cleanup(server);
+        return -1;
+    }
+    
+    // Step 5: Start streaming
+    printf("\n=== Streaming Phase ===\n");
+    signal(SIGINT, signal_handler);
+    
+    int result = frame_streamer_start(streamer);
+    
+    // Cleanup
+    frame_streamer_cleanup(streamer);
+    udp_server_cleanup(server);
+    
+    return result;
+}
+
 // Main entry point with command line argument parsing
 int main(int argc, char *argv[]) {
     printf("Tabcaster - C Version with Output Management\n");
@@ -259,8 +320,6 @@ int main(int argc, char *argv[]) {
     int stream_port = 23532;
 
     // Frame capture variables
-    bool enable_capture = false;
-    char *capture_output = NULL;
     int capture_fps = 30;
 
     char *mode_spec = NULL;
@@ -447,7 +506,7 @@ int main(int argc, char *argv[]) {
         print_output_status(dm, status_output);
     }
     
-    // Test display setup (new functionality)
+    // Test display setup (original functionality)
     if (test_display) {
         if (setup_test_display(dm, test_output_name, test_mode_spec, pos_x, pos_y, reduced_blanking) != 0) {
             fprintf(stderr, "Test display setup failed\n");
@@ -456,85 +515,13 @@ int main(int argc, char *argv[]) {
         }
     }
         
-    // UDP streaming (if requested)
+    // UDP streaming with resolution exchange (new functionality)
     if (enable_stream && stream_output) {
-        printf("\n=== UDP Frame Streaming ===\n");
-        
-        FrameCapture *fc = fc_init(dm, stream_output, capture_fps);
-        if (!fc) {
-            fprintf(stderr, "Failed to initialize capture\n");
-            dm_cleanup(dm);
-            return 1;
-        }
-        
-        // Initialize UDP streamer
-        UDPStreamer *streamer = udp_init(stream_port);
-        if (!streamer) {
-            fprintf(stderr, "Failed to initialize UDP streamer\n");
-            fc_cleanup(fc);
-            dm_cleanup(dm);
-            return 1;
-        }
-        
-        udp_print_status(streamer);
-        fc_print_frame_info(fc);
-        
-        if (fc_start(fc) != 0) {
-            udp_cleanup(streamer);
-            fc_cleanup(fc);
-            dm_cleanup(dm);
-            return 1;
-        }
-        
-        // Wait for client connection
-        if (udp_wait_for_client(streamer) != 0) {
-            udp_cleanup(streamer);
-            fc_cleanup(fc);
-            dm_cleanup(dm);
-            return 1;
-        }
-        
-        // Send frame info to client
-        udp_send_frame_info(streamer, fc->width, fc->height);
-        
-        signal(SIGINT, signal_handler);
-        printf("Streaming... Press Ctrl+C to stop\n");
-        
-        // Streaming loop
-        uint32_t frame_id = 0;
-        int frames_sent = 0;
-        
-        while (keep_running) {
-            int result = fc_capture_frame(fc);
-            
-            if (result == 1) {  // New frame captured
-                XImage *frame = fc_get_frame(fc);
-                if (frame) {
-                    if (udp_send_frame(streamer, frame, frame_id) == 0) {
-                        frames_sent++;
-                        frame_id++;
-                        
-                        if (frames_sent % 60 == 0) {
-                            printf("Sent %d frames\n", frames_sent);
-                        }
-                    } else {
-                        fprintf(stderr, "Failed to send frame %d\n", frame_id);
-                    }
-                    
-                    fc_mark_frame_processed(fc);
-                }
-            } else if (result < 0) {
-                fprintf(stderr, "Capture failed\n");
-                break;
-            }
-            
-            // Small sleep to prevent busy waiting
-            usleep(5000); // 5ms
-        }
-        
-        printf("\nStreamed %d frames\n", frames_sent);
-        udp_cleanup(streamer);
-        fc_cleanup(fc);
+        int result = stream_with_resolution_exchange(dm, stream_output, stream_port, 
+                                                    capture_fps, pos_x, pos_y, 
+                                                    reduced_blanking);
+        dm_cleanup(dm);
+        return result == 0 ? 0 : 1;
     }
     
     // Clean up

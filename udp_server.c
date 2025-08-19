@@ -201,10 +201,11 @@ int udp_server_create_display_for_client(UDPServer *server, const char *target_o
         unsigned int width = fallback_resolutions[i].width;
         unsigned int height = fallback_resolutions[i].height;
         double refresh_rate = fallback_resolutions[i].refresh_rate;
-        
+        printf("Trying resolution: %ux%u",width,height);
+        bool validRefreshRate = fabs(refresh_rate - client->refresh_rate) < 0.1;
+        printf("The refresh rate is valid: %u", validRefreshRate);
         // Skip if it's the same as what we already tried
-        if (width == client->width && height == client->height && 
-            fabs(refresh_rate - client->refresh_rate) < 0.1) {
+        if (width == client->width && height == client->height && validRefreshRate) {
             printf("Skipping %ux%u @ %.1f Hz (already tried)\n", width, height, refresh_rate);
             continue;
         }

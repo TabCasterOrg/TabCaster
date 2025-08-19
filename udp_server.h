@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 
 #define UDP_BUFFER_SIZE 1024
 #define MAX_OUTPUT_NAME 64

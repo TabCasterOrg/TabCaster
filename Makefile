@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2
+CFLAGS = -g -O0 -Wall -Wextra -O2
 LDFLAGS = -lX11 -lXrandr -lxcvt
 
 SRCDIR = .

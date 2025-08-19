@@ -6,6 +6,25 @@
 #include <unistd.h>
 #include <errno.h>
 
+// Fallback resolutions in order of preference
+static const struct {
+    unsigned int width;
+    unsigned int height;
+    double refresh_rate;
+} fallback_resolutions[] = {
+    {1920, 1080, 60.0},   // Full HD
+    {1680, 1050, 60.0},   // WSXGA+
+    {1600, 900, 60.0},    // HD+
+    {1440, 900, 60.0},    // WXGA+
+    {1366, 768, 60.0},    // HD
+    {1280, 1024, 60.0},   // SXGA
+    {1280, 720, 60.0},    // HD 720p
+    {1024, 768, 60.0},    // XGA
+    {800, 600, 60.0},     // SVGA
+};
+
+static const size_t num_fallback_resolutions = sizeof(fallback_resolutions) / sizeof(fallback_resolutions[0]);
+
 // Initialize UDP server
 UDPServer* udp_server_init(int port, DisplayManager *dm) {
     if (!dm) return NULL;
@@ -100,6 +119,130 @@ int udp_server_parse_resolution(const char *message, unsigned int *width,
     return 0;
 }
 
+// Try to create display with a specific resolution
+int udp_server_try_resolution(UDPServer *server, const char *target_output,
+                             unsigned int width, unsigned int height, double refresh_rate) {
+    if (!server || !target_output) return -1;
+    
+    ClientInfo *client = &server->client;
+    
+    printf("Attempting resolution: %ux%u @ %.2f Hz\n", width, height, refresh_rate);
+    
+    // Step 1: Create CVT mode
+    RRMode mode_id = mode_create_cvt(server->dm, width, height, refresh_rate, 
+                                    client->reduced_blanking);
+    
+    if (mode_id == 0) {
+        printf("  ✗ Failed to create CVT mode\n");
+        return -1;
+    }
+    
+    printf("  ✓ CVT mode created (ID: %lu)\n", mode_id);
+    
+    // Step 2: Add mode to output
+    if (mode_add_to_output(server->dm, target_output, mode_id) != 0) {
+        printf("  ✗ Failed to add mode to output\n");
+        mode_delete_from_xrandr(server->dm, mode_id); // Cleanup
+        return -1;
+    }
+    
+    printf("  ✓ Mode added to output\n");
+    
+    // Step 3: Enable output with mode
+    if (mode_enable_output_with_mode_id(server->dm, target_output, mode_id,
+                                       client->x_pos, client->y_pos) != 0) {
+        printf("  ✗ Failed to enable output with mode\n");
+        mode_remove_from_output(server->dm, target_output, mode_id);
+        mode_delete_from_xrandr(server->dm, mode_id);
+        return -1;
+    }
+    
+    printf("  ✓ Output enabled successfully\n");
+    
+    // Store successful configuration
+    strncpy(client->output_name, target_output, sizeof(client->output_name) - 1);
+    client->mode_id = mode_id;
+    client->width = width;    // Update to actual resolution used
+    client->height = height;
+    client->refresh_rate = refresh_rate;
+    client->state = CLIENT_STATE_DISPLAY_READY;
+    
+    return 0;
+}
+
+// Create display for client with fallback resolution support
+int udp_server_create_display_for_client(UDPServer *server, const char *target_output) {
+    if (!server || !target_output || server->client.state != CLIENT_STATE_RESOLUTION_SET) {
+        return -1;
+    }
+    
+    ClientInfo *client = &server->client;
+    
+    printf("\n=== Creating display for client ===\n");
+    printf("Target output: %s\n", target_output);
+    printf("Requested resolution: %ux%u @ %.2f Hz\n", 
+           client->width, client->height, client->refresh_rate);
+    
+    // First, try the client's requested resolution
+    printf("\n--- Trying client's requested resolution ---\n");
+    if (udp_server_try_resolution(server, target_output, 
+                                 client->width, client->height, client->refresh_rate) == 0) {
+        printf("✓ Client's requested resolution works!\n");
+        dm_get_screens(server->dm);
+        return udp_server_send_display_info(server);
+    }
+    
+    printf("✗ Client's requested resolution failed\n");
+    
+    // If that fails, try fallback resolutions
+    printf("\n--- Trying fallback resolutions ---\n");
+    
+    for (size_t i = 0; i < num_fallback_resolutions; i++) {
+        unsigned int width = fallback_resolutions[i].width;
+        unsigned int height = fallback_resolutions[i].height;
+        double refresh_rate = fallback_resolutions[i].refresh_rate;
+        
+        // Skip if it's the same as what we already tried
+        if (width == client->width && height == client->height && 
+            fabs(refresh_rate - client->refresh_rate) < 0.1) {
+            printf("Skipping %ux%u @ %.1f Hz (already tried)\n", width, height, refresh_rate);
+            continue;
+        }
+        
+        printf("\nFallback %zu/%zu: ", i + 1, num_fallback_resolutions);
+        if (udp_server_try_resolution(server, target_output, width, height, refresh_rate) == 0) {
+            printf("✓ Fallback resolution %ux%u @ %.1f Hz works!\n", width, height, refresh_rate);
+            
+            // Refresh display manager state
+            dm_get_screens(server->dm);
+            
+            // Send resolution change notification to client
+            char resolution_change[256];
+            snprintf(resolution_change, sizeof(resolution_change), 
+                    "RESOLUTION_CHANGED:%ux%u:%.1f", width, height, refresh_rate);
+            
+            if (udp_server_send_response(server, resolution_change) != 0) {
+                return -1;
+            }
+            
+            return udp_server_send_display_info(server);
+        }
+    }
+    
+    // All resolutions failed
+    printf("\n✗ All resolutions failed - graphics card may not support any of these modes\n");
+    printf("Fallback resolutions tried:\n");
+    for (size_t i = 0; i < num_fallback_resolutions; i++) {
+        printf("  - %ux%u @ %.1f Hz\n", 
+               fallback_resolutions[i].width, 
+               fallback_resolutions[i].height,
+               fallback_resolutions[i].refresh_rate);
+    }
+    
+    udp_server_send_response(server, "DISPLAY_ERROR:All resolutions failed - graphics card incompatible");
+    return -1;
+}
+
 // Handle complete handshake process
 int udp_server_handle_handshake(UDPServer *server) {
     if (!server) return -1;
@@ -168,57 +311,6 @@ int udp_server_handle_handshake(UDPServer *server) {
     }
     
     return 0;
-}
-
-// Create display for client using existing display/mode management
-int udp_server_create_display_for_client(UDPServer *server, const char *target_output) {
-    if (!server || !target_output || server->client.state != CLIENT_STATE_RESOLUTION_SET) {
-        return -1;
-    }
-    
-    ClientInfo *client = &server->client;
-    
-    printf("\n=== Creating display for client ===\n");
-    printf("Target output: %s\n", target_output);
-    printf("Resolution: %ux%u @ %.2f Hz\n", client->width, client->height, client->refresh_rate);
-    
-    // Step 1: Create CVT mode using existing mode manager
-    RRMode mode_id = mode_create_cvt(server->dm, client->width, client->height,
-                                    client->refresh_rate, client->reduced_blanking);
-    
-    if (mode_id == 0) {
-        udp_server_send_response(server, "DISPLAY_ERROR:Failed to create mode");
-        return -1;
-    }
-    
-    // Step 2: Add mode to output
-    if (mode_add_to_output(server->dm, target_output, mode_id) != 0) {
-        mode_delete_from_xrandr(server->dm, mode_id); // Cleanup
-        udp_server_send_response(server, "DISPLAY_ERROR:Failed to add mode to output");
-        return -1;
-    }
-    
-    // Step 3: Enable output with mode
-    if (mode_enable_output_with_mode_id(server->dm, target_output, mode_id,
-                                       client->x_pos, client->y_pos) != 0) {
-        mode_remove_from_output(server->dm, target_output, mode_id);
-        mode_delete_from_xrandr(server->dm, mode_id);
-        udp_server_send_response(server, "DISPLAY_ERROR:Failed to enable output");
-        return -1;
-    }
-    
-    // Store successful configuration
-    strncpy(client->output_name, target_output, sizeof(client->output_name) - 1);
-    client->mode_id = mode_id;
-    client->state = CLIENT_STATE_DISPLAY_READY;
-    
-    // Refresh display manager state
-    dm_get_screens(server->dm);
-    
-    printf("✓ Display created successfully!\n");
-    
-    // Send success response with display info
-    return udp_server_send_display_info(server);
 }
 
 // Send display info to client

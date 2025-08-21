@@ -88,6 +88,17 @@ RRMode mode_create_cvt(DisplayManager *dm, unsigned int width, unsigned int heig
                       double refresh_rate, bool reduced_blanking) {
     if (!dm) return 0;
     
+    // Generate the mode name that would be used
+    char mode_name[64];
+    snprintf(mode_name, sizeof(mode_name), "%dx%d_%.2f", width, height, refresh_rate);
+    
+    // Check if mode already exists
+    RRMode existing_mode = mode_find_by_name(dm, mode_name);
+    if (existing_mode != 0) {
+        printf("Mode '%s' already exists with ID: %lu\n", mode_name, existing_mode);
+        return existing_mode; // Return the existing mode ID
+    }
+    
     // Use libxcvt to calculate CVT timing
     struct libxcvt_mode_info *cvt_mode = libxcvt_gen_mode_info(width, height, refresh_rate, 
                                                                reduced_blanking, false);
@@ -111,8 +122,6 @@ RRMode mode_create_cvt(DisplayManager *dm, unsigned int width, unsigned int heig
     
     // Convert to XRRModeInfo
     XRRModeInfo xrr_mode;
-    char mode_name[64];
-    snprintf(mode_name, sizeof(mode_name), "%dx%d_%.2f", width, height, refresh_rate);
     convert_libxcvt_to_xrr(cvt_mode, &xrr_mode, mode_name);
     
     // Create the mode in XRandR
@@ -127,7 +136,7 @@ RRMode mode_create_cvt(DisplayManager *dm, unsigned int width, unsigned int heig
         return 0;
     }
     
-    printf("Created mode with ID: %lu\n", new_mode_id);
+    printf("Created new mode with ID: %lu\n", new_mode_id);
     return new_mode_id;
 }
 

@@ -5,8 +5,14 @@
 //Temp hotfix to ignore fatal errors
 int ignore_badmatch(Display *d, XErrorEvent *e) {
     if (e->error_code == BadMatch) {
+        printf("Found an X11 BadMatch error. Continuing.");
         return 0; // swallow it
     }
+    if (e->error_code == BadName) {
+        printf("Found an X11 BadName error. Continuing.");
+        return 0; // swallow it
+    }
+
     return 0; // let other errors just pass silently
 }
 
@@ -111,6 +117,7 @@ RRMode mode_create_cvt(DisplayManager *dm, unsigned int width, unsigned int heig
     
     // Create the mode in XRandR
     RRMode new_mode_id = XRRCreateMode(dm->display, dm->root, &xrr_mode);
+    XSync(dm->display, false);
     
     // Clean up libxcvt resources
     free(cvt_mode);

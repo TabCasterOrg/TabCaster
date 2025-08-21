@@ -2,6 +2,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+//Temp hotfix to ignore fatal errors
+int ignore_badmatch(Display *d, XErrorEvent *e) {
+    if (e->error_code == BadMatch) {
+        return 0; // swallow it
+    }
+    return 0; // let other errors just pass silently
+}
 
 // Convert libxcvt_mode_info to XRRModeInfo
 static void convert_libxcvt_to_xrr(const struct libxcvt_mode_info *cvt_mode, XRRModeInfo *xrr_mode, const char *mode_name) {

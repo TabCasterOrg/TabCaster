@@ -60,7 +60,10 @@ int udp_server_handle_handshake(UDPServer *server);
 int udp_server_create_display_for_client(UDPServer *server, const char *target_output);
 int udp_server_send_response(UDPServer *server, const char *message);
 int udp_server_send_display_info(UDPServer *server);
+
 ClientInfo* udp_server_get_client(UDPServer *server);
+RRMode udp_server_get_created_mode_id(UDPServer *server);
+const char* udp_server_get_output_name(UDPServer *server);
 void udp_server_cleanup(UDPServer *server);
 
 // Protocol helpers

@@ -146,7 +146,7 @@ int udp_server_try_resolution(UDPServer *server, const char *target_output,
         return -1;
     }
     
-    printf("  ✓ Mode added to output\n");
+    printf("  ✓ Mode added to output with ID: %lu\n", mode_id);
     
     // Step 3: Enable output with mode
     if (mode_enable_output_with_mode_id(server->dm, target_output, mode_id,
@@ -339,6 +339,33 @@ int udp_server_wait_for_client(UDPServer *server) {
 // Get client info
 ClientInfo* udp_server_get_client(UDPServer *server) {
     return server ? &server->client : NULL;
+}
+
+// Get the mode ID that was created for the client
+RRMode udp_server_get_created_mode_id(UDPServer *server) {
+
+    
+    if (server->client.state < CLIENT_STATE_DISPLAY_READY) {
+        fprintf(stderr, "udp_server_get_created_mode_id: client not in ready state (%d)\n", 
+                server->client.state);
+        return 0;
+    }
+    
+    return server->client.mode_id;
+}
+
+// Get the mode name that was created for the client
+
+const char* udp_server_get_output_name(UDPServer *server) {
+
+    
+    if (server->client.state < CLIENT_STATE_DISPLAY_READY) {
+        fprintf(stderr, "udp_server_get_output_name: client not in ready state (%d)\n", 
+                server->client.state);
+        return NULL;
+    }
+    
+    return server->client.output_name;
 }
 
 // Print server status

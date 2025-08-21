@@ -1,4 +1,6 @@
 #include "frame_streamer.h"
+#include "udp_server.h"
+#include "mode_manager.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -243,17 +245,17 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
 int frame_streamer_start(FrameStreamer *streamer) {
     if (!streamer) return -1;
     
-    // Step 1: Wait for client to request streaming
+    // STEP 1: Wait for client to request streaming
     if (frame_streamer_wait_for_start_command(streamer) != 0) {
         return -1;
     }
     
-    // Step 2: Send frame info
+    // STEP 2: Send frame info
     if (frame_streamer_send_frame_info(streamer) != 0) {
         return -1;
     }
     
-    // Step 3: Run streaming loop
+    // STEP 3: Run streaming loop
     return frame_streamer_run_loop(streamer);
 }
 
@@ -272,6 +274,55 @@ void frame_streamer_print_status(FrameStreamer *streamer) {
     }
 }
 
+// Cleanup display configuration (disable output, remove mode, delete mode)
+static int cleanup_display_config(FrameStreamer *streamer) {
+    if (!streamer || !streamer->udp_server) {
+        return -1;
+    }
+    
+    // Get display configuration from UDP server
+    RRMode mode_id = udp_server_get_created_mode_id(streamer->udp_server);
+    const char* output_name = udp_server_get_output_name(streamer->udp_server);
+    DisplayManager *dm = streamer->udp_server->dm;
+    
+    if (mode_id == 0 || !output_name || !dm) {
+        printf("No display cleanup needed (no mode was created)\n");
+        return 0;
+    }
+    
+    printf("\n=== Cleaning up stream display '%s' ===\n", output_name);
+    
+    // STEP 1: Disable output
+    printf("STEP 1: Disabling output '%s'...\n", output_name);
+    if (mode_disable_output(dm, output_name) != 0) {
+        fprintf(stderr, "Warning: Failed to disable output '%s'\n", output_name);
+        // Continue with cleanup even if disable fails
+    } else {
+        printf(" Output disabled successfully\n");
+    }
+    
+    // STEP 2: Remove mode from output
+    printf("STEP 2: Removing mode %lu from output '%s'...\n", mode_id, output_name);
+    if (mode_remove_from_output(dm, output_name, mode_id) != 0) {
+        fprintf(stderr, "Warning: Failed to remove mode from output '%s'\n", output_name);
+        // Continue with cleanup even if remove fails
+    } else {
+        printf(" Mode removed from output successfully\n");
+    }
+    
+    // STEP 3: Delete mode from XRandR
+    printf("STEP 3: Deleting mode %lu from XRandR...\n", mode_id);
+    if (mode_delete_from_xrandr(dm, mode_id) != 0) {
+        fprintf(stderr, "Warning: Failed to delete mode from XRandR\n");
+    } else {
+        printf(" Mode deleted from XRandR successfully\n");
+    }
+    
+    printf(" Stream display cleanup completed\n");
+    return 0;
+}
+
+
 // Stop streaming
 void frame_streamer_stop(FrameStreamer *streamer) {
     if (!streamer) return;
@@ -282,16 +333,22 @@ void frame_streamer_stop(FrameStreamer *streamer) {
     }
 }
 
-// Cleanup resources
+// Cleanup resources- calls every other cleanup function 
 void frame_streamer_cleanup(FrameStreamer *streamer) {
     if (!streamer) return;
     
+    // Stop streaming first
     frame_streamer_stop(streamer);
     
+    // Cleanup display configuration
+    cleanup_display_config(streamer);
+    
+    // Cleanup frame capture
     if (streamer->frame_capture) {
         fc_cleanup(streamer->frame_capture);
     }
     
+    // Free RGB buffer
     if (streamer->rgb_buffer) {
         free(streamer->rgb_buffer);
     }

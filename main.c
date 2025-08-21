@@ -258,7 +258,7 @@ int stream_with_resolution_exchange(DisplayManager *dm, const char *output_name,
     
     udp_server_print_status(server);
     
-    // Step 2: Wait for client and complete handshake (including resolution exchange)
+    // Step 2: Wait for client and complete handshake
     printf("\n=== Handshake Phase ===\n");
     if (udp_server_wait_for_client(server) != 0) {
         fprintf(stderr, "Handshake failed\n");
@@ -274,7 +274,7 @@ int stream_with_resolution_exchange(DisplayManager *dm, const char *output_name,
         return -1;
     }
     
-    // Step 4: Initialize frame streamer
+    // Step 4: Initialize frame streamer (now responsible for cleanup)
     printf("\n=== Streaming Setup Phase ===\n");
     FrameStreamer *streamer = frame_streamer_init(server, output_name, fps);
     if (!streamer) {
@@ -288,9 +288,10 @@ int stream_with_resolution_exchange(DisplayManager *dm, const char *output_name,
     signal(SIGINT, signal_handler);
     
     int result = frame_streamer_start(streamer);
-    
-    // Cleanup
-    frame_streamer_cleanup(streamer);
+
+    // Step 6: Cleanup (server shutdown and display cleanup)
+    printf("\n=== Cleanup Phase ===\n");
+    frame_streamer_cleanup(streamer);  // This now includes display cleanup
     udp_server_cleanup(server);
     
     return result;

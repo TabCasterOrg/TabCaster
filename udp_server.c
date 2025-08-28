@@ -148,16 +148,30 @@ int udp_server_try_resolution(UDPServer *server, const char *target_output,
     
     printf("  ✓ Mode added to output with ID: %lu\n", mode_id);
     
-    // Step 3: Enable output with mode
+    // Step 3: Refresh display manager resources to include the new mode
+    dm_get_screens(server->dm);
+    
+    // Step 4: Calculate auto-position (left of primary)
+    int calculated_x = 0, calculated_y = 0;
+    if (mode_calculate_right_of_position(server->dm, &calculated_x, &calculated_y, 
+                                       width, height) != 0) {
+        printf("  ⚠ Could not calculate right-of position, using (0,0)\n");
+        calculated_x = 0;
+        calculated_y = 0;
+    }
+    
+    printf("  ✓ Calculated position: %d,%d\n", calculated_x, calculated_y);
+    
+    // Step 5: Enable output with mode at calculated position
     if (mode_enable_output_with_mode_id(server->dm, target_output, mode_id,
-                                       client->x_pos, client->y_pos) != 0) {
+                                       calculated_x, calculated_y) != 0) {
         printf("  ✗ Failed to enable output with mode\n");
         mode_remove_from_output(server->dm, target_output, mode_id);
         mode_delete_from_xrandr(server->dm, mode_id);
         return -1;
     }
     
-    printf("  ✓ Output enabled successfully\n");
+    printf("  ✓ Output enabled successfully at position %d,%d\n", calculated_x, calculated_y);
     
     // Store successful configuration
     strncpy(client->output_name, target_output, sizeof(client->output_name) - 1);
@@ -165,6 +179,8 @@ int udp_server_try_resolution(UDPServer *server, const char *target_output,
     client->width = width;    // Update to actual resolution used
     client->height = height;
     client->refresh_rate = refresh_rate;
+    client->x_pos = calculated_x;
+    client->y_pos = calculated_y;
     client->state = CLIENT_STATE_DISPLAY_READY;
     
     return 0;
@@ -182,6 +198,7 @@ int udp_server_create_display_for_client(UDPServer *server, const char *target_o
     printf("Target output: %s\n", target_output);
     printf("Requested resolution: %ux%u @ %.2f Hz\n", 
            client->width, client->height, client->refresh_rate);
+    printf("Auto-positioning: LEFT OF PRIMARY\n");
     
     // First, try the client's requested resolution
     printf("\n--- Trying client's requested resolution ---\n");

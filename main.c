@@ -26,6 +26,7 @@ void print_usage(const char *program_name) {
     printf("  --disable OUTPUT          Disable output\n");
     printf("  --status OUTPUT           Show current status of output\n");
     printf("  --position X,Y            Set position when enabling output (default: 0,0)\n");
+    printf("  --left-of                 Auto-position left of primary screen (use with --enable/--enable-id)\n");
     printf("  --reduced-blanking        Use reduced blanking for CVT (with --create-mode)\n");
     printf("  --test-display OUTPUT WxH@R  Create mode, add to output, and enable (all-in-one)\n");
     printf("  --stream OUTPUT           Stream frames from output via UDP (with resolution exchange)\n");
@@ -37,15 +38,17 @@ void print_usage(const char *program_name) {
     printf("  %s --add-mode HDMI-1 123456789\n", program_name);
     printf("  %s --enable HDMI-1 2336x1080_60.00\n", program_name);
     printf("  %s --enable-id HDMI-1 123456789 --position 1920,0\n", program_name);
+    printf("  %s --enable-id HDMI-1 123456789 --left-of\n", program_name);
     printf("  %s --disable HDMI-1\n", program_name);
     printf("  %s --list-modes HDMI-1\n", program_name);
     printf("  %s --status HDMI-1\n", program_name);
     printf("  %s --test-display HDMI-1 2336x1080@60 --position 1920,0\n", program_name);
-    printf("  %s --test-display DP-2 3440x1440@100 --reduced-blanking\n", program_name);
+    printf("  %s --test-display DP-2 3440x1440@100 --reduced-blanking --left-of\n", program_name);
     printf("  %s --stream HDMI-1 --fps 60\n", program_name);
     printf("\nStreaming:\n");
     printf("  --stream creates a display based on client resolution and streams frames.\n");
     printf("  The client sends its resolution during handshake.\n");
+    printf("  Streaming always uses auto-positioning (left of primary).\n");
 }
 
 // Parse mode specification (WxH@R format)
@@ -141,7 +144,7 @@ void print_output_status(DisplayManager *dm, const char *output_name) {
 
 // Test display functionality - create mode, add to output, and enable
 int setup_test_display(DisplayManager *dm, const char *output_name, const char *mode_spec, 
-                      int pos_x, int pos_y, bool reduced_blanking) {
+                      int pos_x, int pos_y, bool reduced_blanking, bool auto_right_of) {
     if (!dm || !output_name || !mode_spec) {
         fprintf(stderr, "Invalid parameters for test display setup\n");
         return -1;
@@ -159,7 +162,12 @@ int setup_test_display(DisplayManager *dm, const char *output_name, const char *
     printf("Mode specification: %ux%u @ %.2f Hz%s\n", 
            width, height, refresh_rate,
            reduced_blanking ? " (reduced blanking)" : "");
-    printf("Position: %d,%d\n", pos_x, pos_y);
+    
+    if (auto_right_of) {
+        printf("Positioning: Auto (left of primary screen)\n");
+    } else {
+        printf("Position: %d,%d\n", pos_x, pos_y);
+    }
     
     // Step 1: Create CVT mode
     printf("\nStep 1: Creating CVT mode...\n");
@@ -180,9 +188,18 @@ int setup_test_display(DisplayManager *dm, const char *output_name, const char *
     }
     printf("✓ Mode added to output successfully\n");
     
-    // Step 3: Enable output with the new mode
+    // Step 3: Enable output with the new mode (with positioning option)
     printf("\nStep 3: Enabling output with new mode...\n");
-    if (mode_enable_output_with_mode_id(dm, output_name, mode_id, pos_x, pos_y) != 0) {
+    
+    int result;
+    if (auto_right_of) {
+        result = mode_enable_output_with_mode_id_positioned(dm, output_name, mode_id, 
+                                                           pos_x, pos_y, true);
+    } else {
+        result = mode_enable_output_with_mode_id(dm, output_name, mode_id, pos_x, pos_y);
+    }
+    
+    if (result != 0) {
         fprintf(stderr, "Failed to enable output '%s' with mode ID %lu\n", output_name, mode_id);
         fprintf(stderr, "Cleaning up: removing mode from output and deleting\n");
         mode_remove_from_output(dm, output_name, mode_id);
@@ -190,7 +207,6 @@ int setup_test_display(DisplayManager *dm, const char *output_name, const char *
         return -1;
     }
     printf("✓ Output enabled successfully\n");
-    
     
     // Refresh screen information to get updated status
     dm_get_screens(dm);
@@ -221,7 +237,7 @@ int setup_test_display(DisplayManager *dm, const char *output_name, const char *
         
         return 0;
     } else {
-        fprintf(stderr, "Setup appears to have not configured\n");
+        fprintf(stderr, "Setup appears to have failed, but mode was created\n");
         
         // Still show the mode ID for manual cleanup if needed
         printf("\nCreated mode ID: %lu\n", mode_id);
@@ -230,14 +246,13 @@ int setup_test_display(DisplayManager *dm, const char *output_name, const char *
         printf("  %s --remove-mode %s %lu\n", "tabcaster", output_name, mode_id);
         printf("  %s --delete-mode %lu\n", "tabcaster", mode_id);
         
-        return 0; // Don't treat as failure 
+        return 0; // Don't treat as failure since mode was created
     }
 }
 
-// Stream with resolution exchange with client
+// Stream with resolution exchange with client (auto-positioning is built into UDP server now)
 int stream_with_resolution_exchange(DisplayManager *dm, const char *output_name, 
-                                   int port, int fps, int pos_x, int pos_y, 
-                                   bool reduced_blanking) {
+                                   int port, int fps) {
     if (!dm || !output_name) {
         fprintf(stderr, "Invalid parameters for streaming\n");
         return -1;
@@ -247,7 +262,7 @@ int stream_with_resolution_exchange(DisplayManager *dm, const char *output_name,
     printf("Output: %s\n", output_name);
     printf("Port: %d\n", port);
     printf("FPS: %d\n", fps);
-    printf("Position: %d,%d\n", pos_x, pos_y);
+    printf("Positioning: Auto (left of primary screen)\n");
     
     // Step 1: Initialize UDP server
     UDPServer *server = udp_server_init(port, dm);
@@ -314,6 +329,7 @@ int main(int argc, char *argv[]) {
     bool show_status = false;
     bool reduced_blanking = false;
     bool test_display = false;
+    bool auto_right_of = false;
 
     // UDP streaming variables
     bool enable_stream = false;
@@ -385,6 +401,8 @@ int main(int argc, char *argv[]) {
             if (parse_position(argv[++i], &pos_x, &pos_y) != 0) {
                 return 1;
             }
+        } else if (strcmp(argv[i], "--left-of") == 0) {
+            auto_right_of = true;
         } else if (strcmp(argv[i], "--reduced-blanking") == 0) {
             reduced_blanking = true;
         } else if (strcmp(argv[i], "--help") == 0) {
@@ -402,6 +420,13 @@ int main(int argc, char *argv[]) {
     // Default to list mode if no arguments
     if (argc == 1) {
         list_mode = true;
+    }
+    
+    // Validate conflicting options
+    if (auto_right_of && (pos_x != 0 || pos_y != 0)) {
+        fprintf(stderr, "Warning: --left-of overrides --position coordinates\n");
+        pos_x = 0;
+        pos_y = 0;
     }
     
     // Initialize display manager
@@ -452,6 +477,7 @@ int main(int argc, char *argv[]) {
                 printf("To use this mode:\n");
                 printf("  Add to output: %s --add-mode OUTPUT_NAME %lu\n", argv[0], new_mode_id);
                 printf("  Enable output: %s --enable-id OUTPUT_NAME %lu\n", argv[0], new_mode_id);
+                printf("  Enable left of primary: %s --enable-id OUTPUT_NAME %lu --left-of\n", argv[0], new_mode_id);
             } else {
                 fprintf(stderr, "Failed to create CVT mode\n");
             }
@@ -464,6 +490,7 @@ int main(int argc, char *argv[]) {
         } else {
             printf("Mode added successfully. You can now enable it with:\n");
             printf("  %s --enable-id %s %lu\n", argv[0], output_name, mode_id);
+            printf("  %s --enable-id %s %lu --left-of\n", argv[0], output_name, mode_id);
         }
     }
     
@@ -480,8 +507,13 @@ int main(int argc, char *argv[]) {
     }
     
     if (enable_output) {
-        printf("Enabling output '%s' with mode '%s' at position %d,%d\n", 
-               output_name, mode_name, pos_x, pos_y);
+        if (auto_right_of) {
+            printf("Enabling output '%s' with mode '%s' (auto-positioned left of primary)\n", 
+                   output_name, mode_name);
+        } else {
+            printf("Enabling output '%s' with mode '%s' at position %d,%d\n", 
+                   output_name, mode_name, pos_x, pos_y);
+        }
         
         if (mode_enable_output_with_mode(dm, output_name, mode_name, pos_x, pos_y) != 0) {
             fprintf(stderr, "Failed to enable output with mode\n");
@@ -489,11 +521,21 @@ int main(int argc, char *argv[]) {
     }
     
     if (enable_output_id) {
-        printf("Enabling output '%s' with mode ID %lu at position %d,%d\n", 
-               output_name, mode_id, pos_x, pos_y);
-        
-        if (mode_enable_output_with_mode_id(dm, output_name, mode_id, pos_x, pos_y) != 0) {
-            fprintf(stderr, "Failed to enable output with mode ID\n");
+        if (auto_right_of) {
+            printf("Enabling output '%s' with mode ID %lu (auto-positioned left of primary)\n", 
+                   output_name, mode_id);
+            
+            if (mode_enable_output_with_mode_id_positioned(dm, output_name, mode_id, 
+                                                          pos_x, pos_y, true) != 0) {
+                fprintf(stderr, "Failed to enable output with mode ID (auto-positioned)\n");
+            }
+        } else {
+            printf("Enabling output '%s' with mode ID %lu at position %d,%d\n", 
+                   output_name, mode_id, pos_x, pos_y);
+            
+            if (mode_enable_output_with_mode_id(dm, output_name, mode_id, pos_x, pos_y) != 0) {
+                fprintf(stderr, "Failed to enable output with mode ID\n");
+            }
         }
     }
     
@@ -507,20 +549,19 @@ int main(int argc, char *argv[]) {
         print_output_status(dm, status_output);
     }
     
-    // Test display setup (original functionality)
+    // Test display setup with auto-positioning option
     if (test_display) {
-        if (setup_test_display(dm, test_output_name, test_mode_spec, pos_x, pos_y, reduced_blanking) != 0) {
+        if (setup_test_display(dm, test_output_name, test_mode_spec, pos_x, pos_y, 
+                              reduced_blanking, auto_right_of) != 0) {
             fprintf(stderr, "Test display setup failed\n");
             dm_cleanup(dm);
             return 1;
         }
     }
         
-    // UDP streaming with resolution exchange (new functionality)
+    // UDP streaming (auto-positioning is built into the UDP server)
     if (enable_stream && stream_output) {
-        int result = stream_with_resolution_exchange(dm, stream_output, stream_port, 
-                                                    capture_fps, pos_x, pos_y, 
-                                                    reduced_blanking);
+        int result = stream_with_resolution_exchange(dm, stream_output, stream_port, capture_fps);
         dm_cleanup(dm);
         return result == 0 ? 0 : 1;
     }

@@ -32,7 +32,7 @@ int mode_enable_output_with_mode_id(DisplayManager *dm, const char *output_name,
 // Enhanced positioning version with auto left-of support
 int mode_enable_output_with_mode_id_positioned(DisplayManager *dm, const char *output_name, 
                                              RRMode mode_id, int x_pos, int y_pos, 
-                                             bool auto_left_of);
+                                             bool auto_right_of);
 
 int mode_disable_output(DisplayManager *dm, const char *output_name);
 
@@ -43,7 +43,7 @@ int mode_get_output_config(DisplayManager *dm, const char *output_name,
                           unsigned int *width, unsigned int *height);
 
 // Desktop management functions (NEW)
-int mode_calculate_left_of_position(DisplayManager *dm, int *x, int *y, 
+int mode_calculate_right_of_position(DisplayManager *dm, int *x, int *y, 
                                    unsigned int width, unsigned int height);
 int mode_expand_desktop_for_screens(DisplayManager *dm);
 

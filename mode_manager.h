@@ -50,5 +50,6 @@ int mode_expand_desktop_for_screens(DisplayManager *dm);
 // Error handler for X11
 // X11 error handler with flag setting TEMP DEBUG
 void mode_manager_init_error_handling(void);
+int ignore_badmatch_with_flag(Display *d, XErrorEvent *e);
 
 #endif // MODE_MANAGER_H

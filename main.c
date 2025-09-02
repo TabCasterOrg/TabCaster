@@ -9,6 +9,8 @@
 #include "frame_streamer.h"
 #include <signal.h>
 
+
+
 static volatile bool keep_running = true;
 
 // Print usage information
@@ -315,6 +317,8 @@ int stream_with_resolution_exchange(DisplayManager *dm, const char *output_name,
 // Main entry point with command line argument parsing
 int main(int argc, char *argv[]) {
     printf("Tabcaster - C Version with Output Management\n");
+    // Initialize X11 error handling TEMP DEBUG
+    XSetErrorHandler(ignore_badmatch_with_flag);
     
     // Parse command line arguments
     bool list_mode = false;

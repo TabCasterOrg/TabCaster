@@ -2,18 +2,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-//Temp hotfix to ignore fatal errors
-int ignore_badmatch(Display *d, XErrorEvent *e) {
+
+
+// Global flag for tracking X11 errors during mode operations
+static volatile int x11_operation_failed = 0;
+
+// Temp error handler that sets a flag for critical operations
+int ignore_badmatch_with_flag(Display *d, XErrorEvent *e) {
     if (e->error_code == BadMatch) {
-        printf("Found an X11 BadMatch error. Continuing.");
+        printf("Found an X11 BadMatch error. Continuing.\n");
+        x11_operation_failed = 1; // Set flag
         return 0; // swallow it
     }
     if (e->error_code == BadName) {
-        printf("Found an X11 BadName error. Continuing.");
+        printf("Found an X11 BadName error. Continuing.\n");
+        x11_operation_failed = 1; // Set flag
         return 0; // swallow it
     }
 
     return 0; // let other errors just pass silently
+}
+
+// Helper function to reset error flag and install handler
+static void reset_x11_error_tracking() {
+    x11_operation_failed = 0;
+    XSetErrorHandler(ignore_badmatch_with_flag);
+}
+
+// Helper function to check if operation failed
+static int check_x11_operation_result() {
+    return x11_operation_failed;
 }
 
 // Convert libxcvt_mode_info to XRRModeInfo
@@ -311,13 +329,23 @@ int mode_add_to_output(DisplayManager *dm, const char *output_name, RRMode mode_
         return -1;
     }
     
+    // Reset error tracking before the operation
+    reset_x11_error_tracking();
+    
     // Add the mode to the output
     XRRAddOutputMode(dm->display, target_output, mode_id);
-    XSync(dm->display, False);
+    XSync(dm->display, False); // Force processing of the request
+    
+    // Check if the operation failed
+    if (check_x11_operation_result()) {
+        printf("XRRAddOutputMode failed for mode ID %lu on output '%s'\n", mode_id, output_name);
+        return -1;
+    }
     
     printf("Added mode ID %lu to output '%s'\n", mode_id, output_name);
     return 0;
 }
+
 
 // Remove mode from a specific output using RRMode ID
 int mode_remove_from_output(DisplayManager *dm, const char *output_name, RRMode mode_id) {
@@ -498,25 +526,29 @@ int mode_enable_output_with_mode_id_positioned(DisplayManager *dm, const char *o
         }
     }
     
+    // Reset error tracking before the operation
+    reset_x11_error_tracking();
+    
     Status result = XRRSetCrtcConfig(dm->display, dm->resources, crtc, 
                                     CurrentTime, final_x, final_y, mode_id, 
                                     RR_Rotate_0, &output, 1);
     
     XSync(dm->display, False);
     
-    if (result == RRSetConfigSuccess) {
-        printf("Enabled output '%s' with mode ID %lu at position %d,%d\n", 
-               output_name, mode_id, final_x, final_y);
-        
-        // Expand desktop to accommodate new screen
-        mode_expand_desktop_for_screens(dm);
-        
-        return 0;
-    } else {
-        fprintf(stderr, "Failed to enable output '%s' (error code: %d)\n", 
-                output_name, result);
+    // Check both the Status return and any X11 errors
+    if (result != RRSetConfigSuccess || check_x11_operation_result()) {
+        fprintf(stderr, "Failed to enable output '%s' (status: %d, x11_error: %d)\n", 
+                output_name, result, check_x11_operation_result());
         return -1;
     }
+    
+    printf("Enabled output '%s' with mode ID %lu at position %d,%d\n", 
+           output_name, mode_id, final_x, final_y);
+    
+    // Expand desktop to accommodate new screen
+    mode_expand_desktop_for_screens(dm);
+    
+    return 0;
 }
 
 // Disable output (mimics xrandr --output HDMI-1 --off)

@@ -48,6 +48,7 @@ int mode_calculate_right_of_position(DisplayManager *dm, int *x, int *y,
 int mode_expand_desktop_for_screens(DisplayManager *dm);
 
 // Error handler for X11
-int ignore_badmatch(Display *d, XErrorEvent *e);
+// X11 error handler with flag setting TEMP DEBUG
+void mode_manager_init_error_handling(void);
 
 #endif // MODE_MANAGER_H

@@ -74,21 +74,35 @@ static void convert_libxcvt_to_xrr(const struct libxcvt_mode_info *cvt_mode, XRR
 
 // Find an available CRTC that's not currently in use
 static RRCrtc find_available_crtc(DisplayManager *dm) {
+    RRCrtc best_crtc = None;
+    
     for (int i = 0; i < dm->resources->ncrtc; i++) {
         RRCrtc crtc = dm->resources->crtcs[i];
         XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(dm->display, dm->resources, crtc);
         
         if (crtc_info) {
-            // CRTC is available if it has no outputs assigned
-            bool available = (crtc_info->noutput == 0);
-            XRRFreeCrtcInfo(crtc_info);
-            
-            if (available) {
-                return crtc;
+            // Prefer CRTCs with no outputs (original logic)
+            if (crtc_info->noutput == 0) {
+                XRRFreeCrtcInfo(crtc_info);
+                return crtc; // Return immediately if we find a completely free CRTC
             }
+            
+            // Fallback: any CRTC can potentially be used (store the first one)
+            if (best_crtc == None) {
+                best_crtc = crtc;
+            }
+            
+            XRRFreeCrtcInfo(crtc_info);
         }
     }
-    return None; // No available CRTC found
+    
+    // If no completely free CRTC found, return the first available CRTC
+    // XRandR can often reassign CRTCs as needed
+    if (best_crtc != None) {
+        printf("No free CRTC found, using CRTC that may be reassigned\n");
+    }
+    
+    return best_crtc;
 }
 
 // Find output ID by name

@@ -3,6 +3,37 @@
 #include <stdlib.h>
 #include <string.h>
 
+
+// Global flag for tracking X11 errors during mode operations
+static volatile int x11_operation_failed = 0;
+
+// Temp error handler that sets a flag for critical operations
+int ignore_badmatch_with_flag(Display *d, XErrorEvent *e) {
+    if (e->error_code == BadMatch) {
+        printf("Found an X11 BadMatch error. Continuing.\n");
+        x11_operation_failed = 1; // Set flag
+        return 0; // swallow it
+    }
+    if (e->error_code == BadName) {
+        printf("Found an X11 BadName error. Continuing.\n");
+        x11_operation_failed = 1; // Set flag
+        return 0; // swallow it
+    }
+
+    return 0; // let other errors just pass silently
+}
+
+// Helper function to reset error flag and install handler
+static void reset_x11_error_tracking() {
+    x11_operation_failed = 0;
+    XSetErrorHandler(ignore_badmatch_with_flag);
+}
+
+// Helper function to check if operation failed
+static int check_x11_operation_result() {
+    return x11_operation_failed;
+}
+
 // Convert libxcvt_mode_info to XRRModeInfo
 static void convert_libxcvt_to_xrr(const struct libxcvt_mode_info *cvt_mode, XRRModeInfo *xrr_mode, const char *mode_name) {
     memset(xrr_mode, 0, sizeof(XRRModeInfo));
@@ -43,21 +74,35 @@ static void convert_libxcvt_to_xrr(const struct libxcvt_mode_info *cvt_mode, XRR
 
 // Find an available CRTC that's not currently in use
 static RRCrtc find_available_crtc(DisplayManager *dm) {
+    RRCrtc best_crtc = None;
+    
     for (int i = 0; i < dm->resources->ncrtc; i++) {
         RRCrtc crtc = dm->resources->crtcs[i];
         XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(dm->display, dm->resources, crtc);
         
         if (crtc_info) {
-            // CRTC is available if it has no outputs assigned
-            bool available = (crtc_info->noutput == 0);
-            XRRFreeCrtcInfo(crtc_info);
-            
-            if (available) {
-                return crtc;
+            // Prefer CRTCs with no outputs (original logic)
+            if (crtc_info->noutput == 0) {
+                XRRFreeCrtcInfo(crtc_info);
+                return crtc; // Return immediately if we find a completely free CRTC
             }
+            
+            // Fallback: any CRTC can potentially be used (store the first one)
+            if (best_crtc == None) {
+                best_crtc = crtc;
+            }
+            
+            XRRFreeCrtcInfo(crtc_info);
         }
     }
-    return None; // No available CRTC found
+    
+    // If no completely free CRTC found, return the first available CRTC
+    // XRandR can often reassign CRTCs as needed
+    if (best_crtc != None) {
+        printf("No free CRTC found, using CRTC that may be reassigned\n");
+    }
+    
+    return best_crtc;
 }
 
 // Find output ID by name
@@ -70,10 +115,174 @@ static RROutput find_output_by_name(DisplayManager *dm, const char *output_name)
     return None;
 }
 
+// Get mode dimensions from mode ID 
+static int get_mode_dimensions(DisplayManager *dm, RRMode mode_id, unsigned int *width, unsigned int *height) {
+    if (!dm || mode_id == 0 || !width || !height) return -1;
+    
+    // First try the cached resources
+    for (int i = 0; i < dm->resources->nmode; i++) {
+        XRRModeInfo *mode_info = &dm->resources->modes[i];
+        if (mode_info->id == mode_id) {
+            *width = mode_info->width;
+            *height = mode_info->height;
+            return 0;
+        }
+    }
+    
+    // If not found in cached resources, get fresh resources
+    XRRScreenResources *fresh_resources = XRRGetScreenResources(dm->display, dm->root);
+    if (!fresh_resources) return -1;
+    
+    for (int i = 0; i < fresh_resources->nmode; i++) {
+        XRRModeInfo *mode_info = &fresh_resources->modes[i];
+        if (mode_info->id == mode_id) {
+            *width = mode_info->width;
+            *height = mode_info->height;
+            XRRFreeScreenResources(fresh_resources);
+            return 0;
+        }
+    }
+    
+    XRRFreeScreenResources(fresh_resources);
+    return -1; // Mode not found
+}
+
+// Calculate position for --right-of placement relative to primary screen
+int mode_calculate_right_of_position(DisplayManager *dm, int *x, int *y, 
+                                     unsigned int width, unsigned int height) {
+    if (!dm || !x || !y) return -1;
+    
+    ScreenInfo *primary = dm_get_primary_screen(dm);
+    if (primary) {
+        // Place to the right of primary screen
+        *x = primary->x + (int)primary->width;
+        *y = primary->y;  // Align vertically with primary
+        printf("Positioning right of primary screen '%s': %d,%d\n", primary->name, *x, *y);
+    } else {
+        // Fallback: find rightmost active screen and place to its right
+        int rightmost_x = 0;
+        unsigned int rightmost_width = 0;
+        bool found_active = false;
+        
+        for (int i = 0; i < dm->screen_count; i++) {
+            if (dm->screens[i].connected && dm->screens[i].width > 0) {
+                int screen_right = dm->screens[i].x + (int)dm->screens[i].width;
+                if (!found_active || screen_right > (rightmost_x + (int)rightmost_width)) {
+                    rightmost_x = dm->screens[i].x;
+                    rightmost_width = dm->screens[i].width;
+                    found_active = true;
+                }
+            }
+        }
+        
+        if (found_active) {
+            *x = rightmost_x + (int)rightmost_width;
+            *y = 0;
+            printf("No primary screen found, positioning right of rightmost active screen: %d,%d\n", *x, *y);
+        } else {
+            // Ultimate fallback: place at origin
+            *x = 0;
+            *y = 0;
+            printf("No active screens found, using fallback position: %d,%d\n", *x, *y);
+        }
+    }
+    
+    return 0;
+}
+
+// Calculate and set new desktop size to encompass all active screens
+int mode_expand_desktop_for_screens(DisplayManager *dm) {
+    if (!dm) return -1;
+    
+    int min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+    bool first = true;
+    
+    // Find bounding box of all active screens (including newly enabled ones)
+    // We need to check both connected screens and active CRTCs
+    for (int i = 0; i < dm->resources->ncrtc; i++) {
+        RRCrtc crtc = dm->resources->crtcs[i];
+        XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(dm->display, dm->resources, crtc);
+        
+        if (crtc_info && crtc_info->mode != None && crtc_info->width > 0 && crtc_info->height > 0) {
+            int screen_max_x = crtc_info->x + (int)crtc_info->width;
+            int screen_max_y = crtc_info->y + (int)crtc_info->height;
+            
+            if (first) {
+                min_x = crtc_info->x;
+                max_x = screen_max_x;
+                min_y = crtc_info->y;
+                max_y = screen_max_y;
+                first = false;
+            } else {
+                if (crtc_info->x < min_x) min_x = crtc_info->x;
+                if (screen_max_x > max_x) max_x = screen_max_x;
+                if (crtc_info->y < min_y) min_y = crtc_info->y;
+                if (screen_max_y > max_y) max_y = screen_max_y;
+            }
+            
+            printf("Active CRTC found: %dx%d+%d+%d\n", 
+                   crtc_info->width, crtc_info->height, crtc_info->x, crtc_info->y);
+        }
+        
+        if (crtc_info) XRRFreeCrtcInfo(crtc_info);
+    }
+    
+    if (first) {
+        printf("No active screens found for desktop expansion\n");
+        return -1;
+    }
+    
+    unsigned int new_width = max_x - min_x;
+    unsigned int new_height = max_y - min_y;
+    
+    printf("Calculated desktop bounds: %d,%d to %d,%d (size: %ux%u)\n",
+           min_x, min_y, max_x, max_y, new_width, new_height);
+    
+    // Get current screen size for comparison
+    int current_width = DisplayWidth(dm->display, dm->screen);
+    int current_height = DisplayHeight(dm->display, dm->screen);
+    
+    if (new_width != (unsigned int)current_width || new_height != (unsigned int)current_height) {
+        // Calculate DPI-appropriate physical size
+        int current_width_mm = DisplayWidthMM(dm->display, dm->screen);
+        int current_height_mm = DisplayHeightMM(dm->display, dm->screen);
+        
+        // Scale physical dimensions proportionally
+        int new_width_mm = (current_width_mm * (int)new_width) / current_width;
+        int new_height_mm = (current_height_mm * (int)new_height) / current_height;
+        
+        printf("Expanding desktop from %dx%d to %ux%u (physical: %dx%d mm to %dx%d mm)\n",
+               current_width, current_height, new_width, new_height,
+               current_width_mm, current_height_mm, new_width_mm, new_height_mm);
+        
+        // Set the new screen size
+        XRRSetScreenSize(dm->display, dm->root, new_width, new_height,
+                         new_width_mm, new_height_mm);
+        XSync(dm->display, False);
+        
+        printf("Desktop expanded successfully\n");
+    } else {
+        printf("Desktop size already encompasses all screens (%ux%u)\n", new_width, new_height);
+    }
+    
+    return 0;
+}
+
 // Create CVT mode using libxcvt and convert to XRandR
 RRMode mode_create_cvt(DisplayManager *dm, unsigned int width, unsigned int height, 
                       double refresh_rate, bool reduced_blanking) {
     if (!dm) return 0;
+    
+    // Generate the mode name that would be used
+    char mode_name[64];
+    snprintf(mode_name, sizeof(mode_name), "%dx%d_%.2f", width, height, refresh_rate);
+    
+    // Check if mode already exists
+    RRMode existing_mode = mode_find_by_name(dm, mode_name);
+    if (existing_mode != 0) {
+        printf("Mode '%s' already exists with ID: %lu\n", mode_name, existing_mode);
+        return existing_mode; // Return the existing mode ID
+    }
     
     // Use libxcvt to calculate CVT timing
     struct libxcvt_mode_info *cvt_mode = libxcvt_gen_mode_info(width, height, refresh_rate, 
@@ -98,12 +307,11 @@ RRMode mode_create_cvt(DisplayManager *dm, unsigned int width, unsigned int heig
     
     // Convert to XRRModeInfo
     XRRModeInfo xrr_mode;
-    char mode_name[64];
-    snprintf(mode_name, sizeof(mode_name), "%dx%d_%.2f", width, height, refresh_rate);
     convert_libxcvt_to_xrr(cvt_mode, &xrr_mode, mode_name);
     
     // Create the mode in XRandR
     RRMode new_mode_id = XRRCreateMode(dm->display, dm->root, &xrr_mode);
+    XSync(dm->display, false);
     
     // Clean up libxcvt resources
     free(cvt_mode);
@@ -113,7 +321,7 @@ RRMode mode_create_cvt(DisplayManager *dm, unsigned int width, unsigned int heig
         return 0;
     }
     
-    printf("Created mode with ID: %lu\n", new_mode_id);
+    printf("Created new mode with ID: %lu\n", new_mode_id);
     return new_mode_id;
 }
 
@@ -135,13 +343,23 @@ int mode_add_to_output(DisplayManager *dm, const char *output_name, RRMode mode_
         return -1;
     }
     
+    // Reset error tracking before the operation
+    reset_x11_error_tracking();
+    
     // Add the mode to the output
     XRRAddOutputMode(dm->display, target_output, mode_id);
-    XSync(dm->display, False);
+    XSync(dm->display, False); // Force processing of the request
+    
+    // Check if the operation failed
+    if (check_x11_operation_result()) {
+        printf("XRRAddOutputMode failed for mode ID %lu on output '%s'\n", mode_id, output_name);
+        return -1;
+    }
     
     printf("Added mode ID %lu to output '%s'\n", mode_id, output_name);
     return 0;
 }
+
 
 // Remove mode from a specific output using RRMode ID
 int mode_remove_from_output(DisplayManager *dm, const char *output_name, RRMode mode_id) {
@@ -257,6 +475,10 @@ int mode_enable_output_with_mode(DisplayManager *dm, const char *output_name,
     if (result == RRSetConfigSuccess) {
         printf("Enabled output '%s' with mode '%s' at position %d,%d\n", 
                output_name, mode_name, x_pos, y_pos);
+        
+        // Expand desktop to accommodate new screen
+        mode_expand_desktop_for_screens(dm);
+        
         return 0;
     } else {
         fprintf(stderr, "Failed to enable output '%s' (error code: %d)\n", 
@@ -265,9 +487,16 @@ int mode_enable_output_with_mode(DisplayManager *dm, const char *output_name,
     }
 }
 
-// Enable output with mode ID (alternative version)
+// Enable output with mode ID (original version)
 int mode_enable_output_with_mode_id(DisplayManager *dm, const char *output_name, 
                                    RRMode mode_id, int x_pos, int y_pos) {
+    return mode_enable_output_with_mode_id_positioned(dm, output_name, mode_id, x_pos, y_pos, false);
+}
+
+// Enable output with mode ID and positioning options (new enhanced version)
+int mode_enable_output_with_mode_id_positioned(DisplayManager *dm, const char *output_name, 
+                                             RRMode mode_id, int x_pos, int y_pos, 
+                                             bool auto_right_of) {
     if (!dm || !output_name || mode_id == 0) return -1;
     
     RROutput output = find_output_by_name(dm, output_name);
@@ -282,21 +511,58 @@ int mode_enable_output_with_mode_id(DisplayManager *dm, const char *output_name,
         return -1;
     }
     
+    int final_x = x_pos;
+    int final_y = y_pos;
+    
+    // Auto-positioning logic
+    if (auto_right_of) {
+        // Refresh resources to make sure we have the latest mode information
+        XRRScreenResources *fresh_resources = XRRGetScreenResources(dm->display, dm->root);
+        if (fresh_resources) {
+            // Free old resources and use fresh ones
+            if (dm->resources) {
+                XRRFreeScreenResources(dm->resources);
+            }
+            dm->resources = fresh_resources;
+        }
+        
+        unsigned int width = 0, height = 0;
+        if (get_mode_dimensions(dm, mode_id, &width, &height) == 0) {
+            if (mode_calculate_right_of_position(dm, &final_x, &final_y, width, height) != 0) {
+                printf("Warning: Could not calculate left-of position, using provided coordinates\n");
+                final_x = x_pos;
+                final_y = y_pos;
+            }
+        } else {
+            printf("Warning: Could not get mode dimensions for auto-positioning, using provided coordinates\n");
+            final_x = x_pos;
+            final_y = y_pos;
+        }
+    }
+    
+    // Reset error tracking before the operation
+    reset_x11_error_tracking();
+    
     Status result = XRRSetCrtcConfig(dm->display, dm->resources, crtc, 
-                                    CurrentTime, x_pos, y_pos, mode_id, 
+                                    CurrentTime, final_x, final_y, mode_id, 
                                     RR_Rotate_0, &output, 1);
     
     XSync(dm->display, False);
     
-    if (result == RRSetConfigSuccess) {
-        printf("Enabled output '%s' with mode ID %lu at position %d,%d\n", 
-               output_name, mode_id, x_pos, y_pos);
-        return 0;
-    } else {
-        fprintf(stderr, "Failed to enable output '%s' (error code: %d)\n", 
-                output_name, result);
+    // Check both the Status return and any X11 errors
+    if (result != RRSetConfigSuccess || check_x11_operation_result()) {
+        fprintf(stderr, "Failed to enable output '%s' (status: %d, x11_error: %d)\n", 
+                output_name, result, check_x11_operation_result());
         return -1;
     }
+    
+    printf("Enabled output '%s' with mode ID %lu at position %d,%d\n", 
+           output_name, mode_id, final_x, final_y);
+    
+    // Expand desktop to accommodate new screen
+    mode_expand_desktop_for_screens(dm);
+    
+    return 0;
 }
 
 // Disable output (mimics xrandr --output HDMI-1 --off)
@@ -334,6 +600,10 @@ int mode_disable_output(DisplayManager *dm, const char *output_name) {
     
     if (result == RRSetConfigSuccess) {
         printf("Disabled output '%s'\n", output_name);
+        
+        // Recalculate desktop size after disabling
+        mode_expand_desktop_for_screens(dm);
+        
         return 0;
     } else {
         fprintf(stderr, "Failed to disable output '%s' (error code: %d)\n", 

@@ -47,4 +47,7 @@ void fc_mark_frame_processed(FrameCapture *fc);
 // Utilities
 void fc_print_frame_info(FrameCapture *fc);
 
+// Cursor compositing
+void fc_composite_cursor(FrameCapture *fc);
+
 #endif // FRAME_CAPTURE_H

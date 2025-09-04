@@ -7,18 +7,45 @@
 #include <sys/stat.h>
 #include <errno.h>
 
-// Create captures directory if it doesn't exist
-static int create_captures_directory() {
-    struct stat st = {0};
+
+
+// Update capture coordinates when display position changes
+int fc_update_position(FrameCapture *fc) {
+    if (!fc || !fc->dm) return -1;
     
-    if (stat("captures", &st) == -1) {
-        if (mkdir("captures", 0755) == -1) {
-            perror("Failed to create captures directory");
-            return -1;
+    // Find the current screen info
+    for (int i = 0; i < fc->dm->screen_count; i++) {
+        if (strcmp(fc->dm->screens[i].name, fc->output_name) == 0) {
+            if (fc->dm->screens[i].connected) {
+                fc->x = fc->dm->screens[i].x;
+                fc->y = fc->dm->screens[i].y;
+                fc->width = fc->dm->screens[i].width;
+                fc->height = fc->dm->screens[i].height;
+                printf("Updated capture position for '%s': %dx%d+%d+%d\n",
+                       fc->output_name, fc->width, fc->height, fc->x, fc->y);
+                return 0;
+            } else {
+                // For virtual displays, get current config
+                RRMode current_mode;
+                int x, y;
+                unsigned int width, height;
+                
+                if (mode_get_output_config(fc->dm, fc->output_name, &current_mode, &x, &y, &width, &height) == 0) {
+                    fc->x = x;
+                    fc->y = y;
+                    fc->width = width;
+                    fc->height = height;
+                    printf("Updated virtual capture position for '%s': %dx%d+%d+%d\n",
+                           fc->output_name, fc->width, fc->height, fc->x, fc->y);
+                    return 0;
+                }
+            }
+            break;
         }
-        printf("Created captures directory\n");
     }
-    return 0;
+    
+    fprintf(stderr, "Could not update position for output '%s'\n", fc->output_name);
+    return -1;
 }
 
 // Initialize frame capture for a specific output
@@ -82,12 +109,7 @@ FrameCapture* fc_init(DisplayManager *dm, const char *output_name, int fps) {
         return NULL;
     }
     
-    // Create captures directory
-    if (create_captures_directory() != 0) {
-        free(fc);
-        return NULL;
-    }
-    
+
     printf("Capture initialized for '%s': %dx%d+%d+%d @ %d fps\n",
            output_name, fc->width, fc->height, fc->x, fc->y, fc->target_fps);
     
@@ -170,46 +192,7 @@ void fc_mark_frame_processed(FrameCapture *fc) {
     if (fc) fc->frame_ready = false;
 }
 
-// Save frame as PPM (simple RGB format) in captures directory
-int fc_save_frame_ppm(FrameCapture *fc, const char *filename) {
-    if (!fc || !fc->current_frame || !filename) return -1;
-    
-    XImage *img = fc->current_frame;
-    
-    // Create full path with captures directory
-    char full_path[512];
-    snprintf(full_path, sizeof(full_path), "captures/%s", filename);
-    
-    FILE *fp = fopen(full_path, "wb");
-    if (!fp) {
-        perror("Failed to open file for writing");
-        return -1;
-    }
-    
-    // PPM header
-    fprintf(fp, "P6\n%d %d\n255\n", img->width, img->height);
-    
-    // Convert pixels to RGB
-    for (int y = 0; y < img->height; y++) {
-        for (int x = 0; x < img->width; x++) {
-            // XGetPixel extracts pixel value at x,y
-            unsigned long pixel = XGetPixel(img, x, y);
-            
-            // Extract RGB components (most displays use BGRA or similar)
-            unsigned char r = (pixel >> 16) & 0xFF;
-            unsigned char g = (pixel >> 8) & 0xFF;
-            unsigned char b = pixel & 0xFF;
-            
-            fputc(r, fp);
-            fputc(g, fp);
-            fputc(b, fp);
-        }
-    }
-    
-    fclose(fp);
-    printf("Saved frame to %s (%dx%d)\n", full_path, img->width, img->height);
-    return 0;
-}
+
 
 // Print detailed frame and capture info
 void fc_print_frame_info(FrameCapture *fc) {

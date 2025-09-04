@@ -31,6 +31,7 @@ int fc_start(FrameCapture *fc);
 int fc_capture_frame(FrameCapture *fc);  // Returns 1 if new frame, 0 if too soon, -1 on error
 int fc_stop(FrameCapture *fc);
 void fc_cleanup(FrameCapture *fc);
+int fc_update_position(FrameCapture *fc);
 
 // Frame access
 XImage* fc_get_frame(FrameCapture *fc);
@@ -38,7 +39,6 @@ bool fc_has_new_frame(FrameCapture *fc);
 void fc_mark_frame_processed(FrameCapture *fc);
 
 // Utilities
-int fc_save_frame_ppm(FrameCapture *fc, const char *filename);
 void fc_print_frame_info(FrameCapture *fc);
 
 #endif // FRAME_CAPTURE_H

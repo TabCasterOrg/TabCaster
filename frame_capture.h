@@ -2,6 +2,7 @@
 #define FRAME_CAPTURE_H
 
 #include "display_manager.h"
+#include <X11/extensions/Xfixes.h>
 #include <sys/time.h>
 #include <stdbool.h>
 
@@ -23,6 +24,11 @@ typedef struct {
     XImage *current_frame;
     bool frame_ready;
     bool capturing;
+
+    // Cursor capture fix
+    bool capture_cursor;
+    int xfixes_event_base;
+    int xfixes_error_base;
 } FrameCapture;
 
 // Core functions

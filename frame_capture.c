@@ -112,6 +112,15 @@ FrameCapture* fc_init(DisplayManager *dm, const char *output_name, int fps) {
 
     printf("Capture initialized for '%s': %dx%d+%d+%d @ %d fps\n",
            output_name, fc->width, fc->height, fc->x, fc->y, fc->target_fps);
+
+    // Check for XFixes extension for cursor capture       
+    if (XFixesQueryExtension(dm->display, &fc->xfixes_event_base, &fc->xfixes_error_base)) {
+        fc->capture_cursor = true;
+        printf("XFixes extension available - cursor capture enabled\n");
+    } else {
+        fc->capture_cursor = false;
+        printf("XFixes extension not available - cursor capture disabled\n");
+    }
     
     return fc;
 }
@@ -162,6 +171,9 @@ int fc_capture_frame(FrameCapture *fc) {
         return -1;
     }
     
+    // Composite cursor onto the frame
+    fc_composite_cursor(fc);
+    
     fc->frame_ready = true;
     fc->last_capture = now;
     
@@ -192,7 +204,45 @@ void fc_mark_frame_processed(FrameCapture *fc) {
     if (fc) fc->frame_ready = false;
 }
 
-
+// Composite cursor onto the captured frame if enabled
+void fc_composite_cursor(FrameCapture *fc) {
+    if (!fc || !fc->current_frame || !fc->capture_cursor) return;
+    
+    // Get cursor image
+    XFixesCursorImage *cursor_img = XFixesGetCursorImage(fc->dm->display);
+    if (!cursor_img) return;
+    
+    // Calculate cursor position relative to capture area
+    int cursor_x = cursor_img->x - fc->x;
+    int cursor_y = cursor_img->y - fc->y;
+    
+    // Check if cursor is within capture bounds
+    if (cursor_x >= -cursor_img->xhot && cursor_x < (int)fc->width &&
+        cursor_y >= -cursor_img->yhot && cursor_y < (int)fc->height) {
+        
+        // Composite cursor onto the frame
+        for (unsigned int cy = 0; cy < cursor_img->height; cy++) {
+            for (unsigned int cx = 0; cx < cursor_img->width; cx++) {
+                int frame_x = cursor_x - cursor_img->xhot + cx;
+                int frame_y = cursor_y - cursor_img->yhot + cy;
+                
+                // Bounds check
+                if (frame_x >= 0 && frame_x < (int)fc->width && 
+                    frame_y >= 0 && frame_y < (int)fc->height) {
+                    
+                    unsigned long cursor_pixel = cursor_img->pixels[cy * cursor_img->width + cx];
+                    unsigned long alpha = (cursor_pixel >> 24) & 0xFF;
+                    
+                    if (alpha > 0) { // If cursor pixel is not fully transparent
+                        XPutPixel(fc->current_frame, frame_x, frame_y, cursor_pixel);
+                    }
+                }
+            }
+        }
+    }
+    
+    XFree(cursor_img);
+}
 
 // Print detailed frame and capture info
 void fc_print_frame_info(FrameCapture *fc) {

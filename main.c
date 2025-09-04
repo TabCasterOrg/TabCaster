@@ -305,6 +305,7 @@ int stream_with_resolution_exchange(DisplayManager *dm, const char *output_name,
     signal(SIGINT, signal_handler);
     
     int result = frame_streamer_start(streamer);
+    fc_update_position(streamer->frame_capture); // Update position in case of changes
 
     // Step 6: Cleanup (server shutdown and display cleanup)
     printf("\n=== Cleanup Phase ===\n");

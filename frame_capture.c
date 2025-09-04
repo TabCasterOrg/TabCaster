@@ -7,18 +7,45 @@
 #include <sys/stat.h>
 #include <errno.h>
 
-// Create captures directory if it doesn't exist
-static int create_captures_directory() {
-    struct stat st = {0};
+
+
+// Update capture coordinates when display position changes
+int fc_update_position(FrameCapture *fc) {
+    if (!fc || !fc->dm) return -1;
     
-    if (stat("captures", &st) == -1) {
-        if (mkdir("captures", 0755) == -1) {
-            perror("Failed to create captures directory");
-            return -1;
+    // Find the current screen info
+    for (int i = 0; i < fc->dm->screen_count; i++) {
+        if (strcmp(fc->dm->screens[i].name, fc->output_name) == 0) {
+            if (fc->dm->screens[i].connected) {
+                fc->x = fc->dm->screens[i].x;
+                fc->y = fc->dm->screens[i].y;
+                fc->width = fc->dm->screens[i].width;
+                fc->height = fc->dm->screens[i].height;
+                printf("Updated capture position for '%s': %dx%d+%d+%d\n",
+                       fc->output_name, fc->width, fc->height, fc->x, fc->y);
+                return 0;
+            } else {
+                // For virtual displays, get current config
+                RRMode current_mode;
+                int x, y;
+                unsigned int width, height;
+                
+                if (mode_get_output_config(fc->dm, fc->output_name, &current_mode, &x, &y, &width, &height) == 0) {
+                    fc->x = x;
+                    fc->y = y;
+                    fc->width = width;
+                    fc->height = height;
+                    printf("Updated virtual capture position for '%s': %dx%d+%d+%d\n",
+                           fc->output_name, fc->width, fc->height, fc->x, fc->y);
+                    return 0;
+                }
+            }
+            break;
         }
-        printf("Created captures directory\n");
     }
-    return 0;
+    
+    fprintf(stderr, "Could not update position for output '%s'\n", fc->output_name);
+    return -1;
 }
 
 // Initialize frame capture for a specific output
@@ -82,14 +109,18 @@ FrameCapture* fc_init(DisplayManager *dm, const char *output_name, int fps) {
         return NULL;
     }
     
-    // Create captures directory
-    if (create_captures_directory() != 0) {
-        free(fc);
-        return NULL;
-    }
-    
+
     printf("Capture initialized for '%s': %dx%d+%d+%d @ %d fps\n",
            output_name, fc->width, fc->height, fc->x, fc->y, fc->target_fps);
+
+    // Check for XFixes extension for cursor capture       
+    if (XFixesQueryExtension(dm->display, &fc->xfixes_event_base, &fc->xfixes_error_base)) {
+        fc->capture_cursor = true;
+        printf("XFixes extension available - cursor capture enabled\n");
+    } else {
+        fc->capture_cursor = false;
+        printf("XFixes extension not available - cursor capture disabled\n");
+    }
     
     return fc;
 }
@@ -140,6 +171,9 @@ int fc_capture_frame(FrameCapture *fc) {
         return -1;
     }
     
+    // Composite cursor onto the frame
+    fc_composite_cursor(fc);
+    
     fc->frame_ready = true;
     fc->last_capture = now;
     
@@ -170,45 +204,44 @@ void fc_mark_frame_processed(FrameCapture *fc) {
     if (fc) fc->frame_ready = false;
 }
 
-// Save frame as PPM (simple RGB format) in captures directory
-int fc_save_frame_ppm(FrameCapture *fc, const char *filename) {
-    if (!fc || !fc->current_frame || !filename) return -1;
+// Composite cursor onto the captured frame if enabled
+void fc_composite_cursor(FrameCapture *fc) {
+    if (!fc || !fc->current_frame || !fc->capture_cursor) return;
     
-    XImage *img = fc->current_frame;
+    // Get cursor image
+    XFixesCursorImage *cursor_img = XFixesGetCursorImage(fc->dm->display);
+    if (!cursor_img) return;
     
-    // Create full path with captures directory
-    char full_path[512];
-    snprintf(full_path, sizeof(full_path), "captures/%s", filename);
+    // Calculate cursor position relative to capture area
+    int cursor_x = cursor_img->x - fc->x;
+    int cursor_y = cursor_img->y - fc->y;
     
-    FILE *fp = fopen(full_path, "wb");
-    if (!fp) {
-        perror("Failed to open file for writing");
-        return -1;
-    }
-    
-    // PPM header
-    fprintf(fp, "P6\n%d %d\n255\n", img->width, img->height);
-    
-    // Convert pixels to RGB
-    for (int y = 0; y < img->height; y++) {
-        for (int x = 0; x < img->width; x++) {
-            // XGetPixel extracts pixel value at x,y
-            unsigned long pixel = XGetPixel(img, x, y);
-            
-            // Extract RGB components (most displays use BGRA or similar)
-            unsigned char r = (pixel >> 16) & 0xFF;
-            unsigned char g = (pixel >> 8) & 0xFF;
-            unsigned char b = pixel & 0xFF;
-            
-            fputc(r, fp);
-            fputc(g, fp);
-            fputc(b, fp);
+    // Check if cursor is within capture bounds
+    if (cursor_x >= -cursor_img->xhot && cursor_x < (int)fc->width &&
+        cursor_y >= -cursor_img->yhot && cursor_y < (int)fc->height) {
+        
+        // Composite cursor onto the frame
+        for (unsigned int cy = 0; cy < cursor_img->height; cy++) {
+            for (unsigned int cx = 0; cx < cursor_img->width; cx++) {
+                int frame_x = cursor_x - cursor_img->xhot + cx;
+                int frame_y = cursor_y - cursor_img->yhot + cy;
+                
+                // Bounds check
+                if (frame_x >= 0 && frame_x < (int)fc->width && 
+                    frame_y >= 0 && frame_y < (int)fc->height) {
+                    
+                    unsigned long cursor_pixel = cursor_img->pixels[cy * cursor_img->width + cx];
+                    unsigned long alpha = (cursor_pixel >> 24) & 0xFF;
+                    
+                    if (alpha > 0) { // If cursor pixel is not fully transparent
+                        XPutPixel(fc->current_frame, frame_x, frame_y, cursor_pixel);
+                    }
+                }
+            }
         }
     }
     
-    fclose(fp);
-    printf("Saved frame to %s (%dx%d)\n", full_path, img->width, img->height);
-    return 0;
+    XFree(cursor_img);
 }
 
 // Print detailed frame and capture info

@@ -10,17 +10,17 @@ Make sure you have the required development packages installed:
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt install build-essential libx11-dev libxrandr-dev libxcvt-dev
+sudo apt install build-essential libx11-dev libxrandr-dev libxcvt-dev libxfixes-dev
 ```
 
 **Fedora/RHEL:**
 ```bash
-sudo dnf install gcc libX11-devel libXrandr-devel
+sudo dnf install gcc libX11-devel libXrandr-devel  libxfixes-delvel
 ```
 
 **Arch:**
 ```bash
-sudo pacman -S gcc libx11 libxrandr
+sudo pacman -S gcc libx11 libxrandr libxfixes
 ```
 
 ## Building

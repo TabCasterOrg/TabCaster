@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -g -O0 -Wall -Wextra -O2
-LDFLAGS = -lX11 -lXrandr -lxcvt -lXfixes
+LDFLAGS = -lX11 -lXrandr -lxcvt -lXfixes -lXext
 
 SRCDIR = .
 BUILDDIR = build

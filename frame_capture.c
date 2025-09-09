@@ -6,8 +6,9 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
-
-
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <X11/extensions/XShm.h>
 
 // Update capture coordinates when display position changes
 int fc_update_position(FrameCapture *fc) {
@@ -46,6 +47,77 @@ int fc_update_position(FrameCapture *fc) {
     
     fprintf(stderr, "Could not update position for output '%s'\n", fc->output_name);
     return -1;
+}
+
+// Initialize shared memory for XShm
+static int fc_init_shm(FrameCapture *fc) {
+    if (!fc) return -1;
+    
+    // Verify XShm extension is available
+    if (!XShmQueryExtension(fc->dm->display)) {
+        fprintf(stderr, "XShm extension not available - ensure libXext is installed\n");
+        return -1;
+    }
+    
+    // Calculate image size - create XImage first to get proper format
+    XImage *temp_image = XCreateImage(fc->dm->display, 
+                                      DefaultVisual(fc->dm->display, DefaultScreen(fc->dm->display)),
+                                      DefaultDepth(fc->dm->display, DefaultScreen(fc->dm->display)),
+                                      ZPixmap, 0, NULL,
+                                      fc->width, fc->height, 32, 0);
+    
+    if (!temp_image) {
+        fprintf(stderr, "Failed to create temporary XImage for size calculation\n");
+        return -1;
+    }
+    
+    // Calculate the actual size needed
+    size_t image_size = temp_image->bytes_per_line * temp_image->height;
+    XDestroyImage(temp_image);
+    
+    // Create shared memory segment
+    fc->shm_info.shmid = shmget(IPC_PRIVATE, image_size, IPC_CREAT | 0600);
+    if (fc->shm_info.shmid < 0) {
+        perror("shmget failed");
+        return -1;
+    }
+    
+    // Attach shared memory
+    fc->shm_info.shmaddr = shmat(fc->shm_info.shmid, 0, 0);
+    if (fc->shm_info.shmaddr == (char *)-1) {
+        perror("shmat failed");
+        shmctl(fc->shm_info.shmid, IPC_RMID, 0);
+        return -1;
+    }
+    
+    fc->shm_info.readOnly = False;
+    
+    // Attach to X server
+    if (!XShmAttach(fc->dm->display, &fc->shm_info)) {
+        fprintf(stderr, "XShmAttach failed\n");
+        shmdt(fc->shm_info.shmaddr);
+        shmctl(fc->shm_info.shmid, IPC_RMID, 0);
+        return -1;
+    }
+    
+    // Create XImage using shared memory
+    fc->current_frame = XShmCreateImage(fc->dm->display,
+                                        DefaultVisual(fc->dm->display, DefaultScreen(fc->dm->display)),
+                                        DefaultDepth(fc->dm->display, DefaultScreen(fc->dm->display)),
+                                        ZPixmap, fc->shm_info.shmaddr,
+                                        &fc->shm_info,
+                                        fc->width, fc->height);
+    
+    if (!fc->current_frame) {
+        fprintf(stderr, "XShmCreateImage failed\n");
+        XShmDetach(fc->dm->display, &fc->shm_info);
+        shmdt(fc->shm_info.shmaddr);
+        shmctl(fc->shm_info.shmid, IPC_RMID, 0);
+        return -1;
+    }
+    
+    printf("XShm initialized successfully (%zu bytes)\n", image_size);
+    return 0;
 }
 
 // Initialize frame capture for a specific output
@@ -109,8 +181,14 @@ FrameCapture* fc_init(DisplayManager *dm, const char *output_name, int fps) {
         return NULL;
     }
     
+    // Initialize XShm
+    if (fc_init_shm(fc) != 0) {
+        fprintf(stderr, "Failed to initialize XShm for '%s'\n", output_name);
+        free(fc);
+        return NULL;
+    }
 
-    printf("Capture initialized for '%s': %dx%d+%d+%d @ %d fps\n",
+    printf("XShm capture initialized for '%s': %dx%d+%d+%d @ %d fps\n",
            output_name, fc->width, fc->height, fc->x, fc->y, fc->target_fps);
 
     // Check for XFixes extension for cursor capture       
@@ -139,7 +217,7 @@ int fc_start(FrameCapture *fc) {
 
 // Main capture function
 int fc_capture_frame(FrameCapture *fc) {
-    if (!fc || !fc->capturing) return -1;
+    if (!fc || !fc->capturing || !fc->current_frame) return -1;
     
     // Rate limiting - check if enough time has passed
     struct timeval now;
@@ -152,21 +230,10 @@ int fc_capture_frame(FrameCapture *fc) {
         return 0; // Too soon for next frame
     }
     
-    // Free previous frame if it exists
-    if (fc->current_frame) {
-        XDestroyImage(fc->current_frame);
-        fc->current_frame = NULL;
-    }
-    
-    // Capture the screen region using XGetImage
-    // For virtual displays, this captures whatever is rendered to that screen area
-    // Note: The content might be black/empty if nothing is actually rendering there
-    fc->current_frame = XGetImage(fc->dm->display, fc->dm->root,
-                                  fc->x, fc->y, fc->width, fc->height,
-                                  AllPlanes, ZPixmap);
-    
-    if (!fc->current_frame) {
-        fprintf(stderr, "XGetImage failed for %s (%dx%d+%d+%d)\n",
+    // Use XShmGetImage - data goes directly into shared memory
+    if (!XShmGetImage(fc->dm->display, fc->dm->root, fc->current_frame,
+                      fc->x, fc->y, AllPlanes)) {
+        fprintf(stderr, "XShmGetImage failed for %s (%dx%d+%d+%d)\n",
                 fc->output_name, fc->width, fc->height, fc->x, fc->y);
         return -1;
     }
@@ -251,6 +318,7 @@ void fc_print_frame_info(FrameCapture *fc) {
     printf("Capture Status for '%s':\n", fc->output_name);
     printf("  Screen region: %dx%d+%d+%d\n", fc->width, fc->height, fc->x, fc->y);
     printf("  Target FPS: %d (interval: %ld μs)\n", fc->target_fps, fc->frame_interval_us);
+    printf("  Method: XShmGetImage (shared memory)\n");
     printf("  Capturing: %s\n", fc->capturing ? "YES" : "NO");
     printf("  Frame ready: %s\n", fc->frame_ready ? "YES" : "NO");
     
@@ -276,9 +344,15 @@ void fc_cleanup(FrameCapture *fc) {
     fc_stop(fc);
     
     if (fc->current_frame) {
-        XDestroyImage(fc->current_frame);  // This also frees the image data
+        XDestroyImage(fc->current_frame);
         fc->current_frame = NULL;
     }
     
+    // Cleanup shared memory
+    XShmDetach(fc->dm->display, &fc->shm_info);
+    shmdt(fc->shm_info.shmaddr);
+    shmctl(fc->shm_info.shmid, IPC_RMID, 0);
+    
+    printf("XShm resources cleaned up\n");
     free(fc);
 }

@@ -16,40 +16,102 @@ static void signal_handler(int sig) {
     keep_streaming = false;
 }
 
-// Convert XImage to RGB data (same as before but now used for WebP input)
-static void ximage_to_rgb(XImage *img, unsigned char *rgb_buffer) {
+// Fallback conversion for uncommon XImage formats
+static int encode_ximage_fallback(XImage *img, unsigned char **webp_data, 
+                                 size_t *webp_size, float quality) {
+    printf("Using fallback XImage conversion for format: depth=%d, bpp=%d\n", 
+           img->depth, img->bits_per_pixel);
+           
+    size_t rgb_size = img->width * img->height * 3;
+    unsigned char *rgb_buffer = malloc(rgb_size);
+    if (!rgb_buffer) return -1;
+    
+    // Pixel-by-pixel conversion using XGetPixel (slower but reliable)
     for (int y = 0; y < img->height; y++) {
         for (int x = 0; x < img->width; x++) {
             unsigned long pixel = XGetPixel(img, x, y);
-            
-            // Extract RGB components
-            unsigned char r = (pixel >> 16) & 0xFF;
-            unsigned char g = (pixel >> 8) & 0xFF;
-            unsigned char b = pixel & 0xFF;
-            
             int idx = (y * img->width + x) * 3;
-            rgb_buffer[idx] = r;
-            rgb_buffer[idx + 1] = g;
-            rgb_buffer[idx + 2] = b;
+            
+            // Extract RGB components based on masks
+            rgb_buffer[idx]     = (pixel & img->red_mask) >> 16;   // R
+            rgb_buffer[idx + 1] = (pixel & img->green_mask) >> 8;  // G  
+            rgb_buffer[idx + 2] = (pixel & img->blue_mask);        // B
         }
     }
+    
+    *webp_size = WebPEncodeRGB(rgb_buffer, img->width, img->height, 
+                              img->width * 3, quality, webp_data);
+    
+    free(rgb_buffer);
+    return (*webp_size > 0) ? 0 : -1;
 }
 
-// Encode RGB data to WebP format
-static int encode_webp(unsigned char *rgb_data, int width, int height, 
-                      unsigned char **webp_data, size_t *webp_size, float quality) {
-    // Use WebPEncodeRGB for RGB input
-    *webp_size = WebPEncodeRGB(rgb_data, width, height, width * 3, quality, webp_data);
+// Direct XImage to WebP conversion
+static int encode_ximage_to_webp(XImage *img, unsigned char **webp_data, 
+                                size_t *webp_size, float quality) {
+    int width = img->width;
+    int height = img->height;
     
-    if (*webp_size == 0) {
-        fprintf(stderr, "WebP encoding failed\n");
-        return -1;
+    // Debug the XImage format for first frame
+    static int first_call = 1;
+    if (first_call) {
+        printf("XImage format debug:\n");
+        printf("  Depth: %d, BPP: %d, Byte order: %s\n", 
+               img->depth, img->bits_per_pixel, 
+               img->byte_order == LSBFirst ? "LSBFirst" : "MSBFirst");
+        printf("  Red mask: 0x%lx, Green mask: 0x%lx, Blue mask: 0x%lx\n",
+               img->red_mask, img->green_mask, img->blue_mask);
+        first_call = 0;
     }
     
-    return 0;
+    // For specific format (24-bit depth, 32 BPP, LSBFirst)
+    if (img->depth == 24 && img->bits_per_pixel == 32 && img->byte_order == LSBFirst) {
+        // This is BGRX format (Blue, Green, Red, X padding)
+        // X11 typically uses BGRX with red_mask=0xff0000, green_mask=0xff00, blue_mask=0xff
+        
+        if (img->red_mask == 0xff0000 && img->green_mask == 0xff00 && img->blue_mask == 0xff) {
+            // Standard BGRX format - convert to RGBA for WebP
+            size_t rgba_size = width * height * 4;
+            unsigned char *rgba_data = malloc(rgba_size);
+            if (!rgba_data) return -1;
+            
+            unsigned char *src = (unsigned char*)img->data;
+            unsigned char *dst = rgba_data;
+            
+            for (int y = 0; y < height; y++) {
+                unsigned char *line_src = src + (y * img->bytes_per_line);
+                for (int x = 0; x < width; x++) {
+                    // BGRX → RGBA conversion
+                    unsigned char b = line_src[x * 4 + 0];
+                    unsigned char g = line_src[x * 4 + 1];
+                    unsigned char r = line_src[x * 4 + 2];
+                    // Skip X (padding byte at line_src[x * 4 + 3])
+                    
+                    dst[(y * width + x) * 4 + 0] = r; // R
+                    dst[(y * width + x) * 4 + 1] = g; // G
+                    dst[(y * width + x) * 4 + 2] = b; // B
+                    dst[(y * width + x) * 4 + 3] = 255; // A (fully opaque)
+                }
+            }
+            
+            // Encode RGBA to WebP
+            *webp_size = WebPEncodeRGBA(rgba_data, width, height, width * 4, quality, webp_data);
+            free(rgba_data);
+            
+        } else {
+            // Non-standard masks - use pixel-by-pixel conversion
+            return encode_ximage_fallback(img, webp_data, webp_size, quality);
+        }
+    } else {
+        // Other formats - use fallback
+        return encode_ximage_fallback(img, webp_data, webp_size, quality);
+    }
+    
+    return (*webp_size > 0) ? 0 : -1;
 }
 
-// Initialize frame streamer with WebP support
+
+// Initialize frame streamer 
 FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_name, int fps) {
     if (!udp_server || !output_name) return NULL;
     
@@ -66,27 +128,15 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
         return NULL;
     }
     
-    // Allocate RGB conversion buffer (for WebP input)
-    ClientInfo *client = udp_server_get_client(udp_server);
-    streamer->buffer_size = client->width * client->height * 3; // RGB
-    streamer->rgb_buffer = malloc(streamer->buffer_size);
+    // No RGB buffer allocation - direct WebP encoding
+    streamer->webp_quality = 100.0f; // Good balance of quality and compression speed
     
-    if (!streamer->rgb_buffer) {
-        fprintf(stderr, "Failed to allocate RGB buffer\n");
-        fc_cleanup(streamer->frame_capture);
-        free(streamer);
-        return NULL;
-    }
-    
-    // Set WebP quality (0-100, higher = better quality but larger size)
-    streamer->webp_quality = 80.0f; // Good balance of quality and size
-    
-    printf("Frame streamer initialized for output '%s' with WebP encoding (quality: %.1f)\n", 
+    printf("Optimized frame streamer initialized for '%s' with direct WebP encoding (quality: %.1f)\n", 
            output_name, streamer->webp_quality);
     return streamer;
 }
 
-// Wait for START_STREAM command from client (unchanged)
+// Wait for START_STREAM command from client
 int frame_streamer_wait_for_start_command(FrameStreamer *streamer) {
     if (!streamer) return -1;
     
@@ -123,7 +173,7 @@ int frame_streamer_wait_for_start_command(FrameStreamer *streamer) {
     }
 }
 
-// Send frame info to client - now indicates WebP format
+// Send frame info to client - indicates WebP format
 int frame_streamer_send_frame_info(FrameStreamer *streamer) {
     if (!streamer) return -1;
     
@@ -147,22 +197,18 @@ int frame_streamer_send_frame_info(FrameStreamer *streamer) {
     return 0;
 }
 
-// Send WebP encoded frame data in chunks
+// Optimized frame sending with direct WebP encoding
 int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     if (!streamer || !frame) return -1;
     
     UDPServer *server = streamer->udp_server;
     ClientInfo *client = udp_server_get_client(server);
     
-    // Convert XImage to RGB
-    ximage_to_rgb(frame, streamer->rgb_buffer);
-    
-    // Encode to WebP
+    // Direct XImage to WebP conversion - no intermediate RGB buffer
     unsigned char *webp_data = NULL;
     size_t webp_size = 0;
     
-    if (encode_webp(streamer->rgb_buffer, frame->width, frame->height, 
-                   &webp_data, &webp_size, streamer->webp_quality) != 0) {
+    if (encode_ximage_to_webp(frame, &webp_data, &webp_size, streamer->webp_quality) != 0) {
         fprintf(stderr, "Failed to encode frame %d to WebP\n", streamer->frame_id);
         return -1;
     }
@@ -171,21 +217,20 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     size_t data_per_packet = MAX_PACKET_SIZE - sizeof(PacketHeader);
     size_t total_packets = (webp_size + data_per_packet - 1) / data_per_packet;
     
-    // Debug info for first few frames
-    if (streamer->frame_id < 5) {
-        float compression_ratio = (float)streamer->buffer_size / webp_size;
-        printf("Frame %d: %dx%d RGB(%zu bytes) -> WebP(%zu bytes) = %.1fx compression, %zu packets\n",
+    // Debug info for first few frames only
+    if (streamer->frame_id < 3) {
+        size_t estimated_rgb_size = frame->width * frame->height * 3;
+        float compression_ratio = (float)estimated_rgb_size / webp_size;
+        printf("Frame %d: %dx%d -> WebP(%zu bytes) = %.1fx compression, %zu packets\n",
                streamer->frame_id, frame->width, frame->height, 
-               streamer->buffer_size, webp_size, compression_ratio, total_packets);
+               webp_size, compression_ratio, total_packets);
     }
     
-    // Send packets
+    // Send all packets with minimal delays
     for (size_t packet_id = 0; packet_id < total_packets; packet_id++) {
-        // Calculate data size for this packet
         size_t remaining = webp_size - (packet_id * data_per_packet);
         size_t current_data_size = (remaining > data_per_packet) ? data_per_packet : remaining;
         
-        // Create packet
         char packet[MAX_PACKET_SIZE];
         PacketHeader *header = (PacketHeader*)packet;
         
@@ -194,12 +239,10 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
         header->total_packets = htonl(total_packets);
         header->data_size = htonl(current_data_size);
         
-        // Copy WebP data
         memcpy(packet + sizeof(PacketHeader), 
                webp_data + (packet_id * data_per_packet), 
                current_data_size);
         
-        // Send packet
         ssize_t packet_size = sizeof(PacketHeader) + current_data_size;
         ssize_t bytes_sent = sendto(server->socket_fd, packet, packet_size, 0,
                                    (struct sockaddr*)&client->address, 
@@ -207,19 +250,20 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
         
         if (bytes_sent < 0) {
             perror("Failed to send packet");
-            WebPFree(webp_data); // Clean up WebP data
+            WebPFree(webp_data);
             return -1;
         }
         
-        // Small delay between packets
-        usleep(50); // 0.05ms delay
+        // Minimal delay only for very large frames
+        if (total_packets > 100) {
+            usleep(5); // Reduced from 50μs to 5μs, only for huge frames
+        }
     }
     
-    // Free WebP data
     WebPFree(webp_data);
     
-    // Print progress for every 30th frame
-    if (streamer->frame_id % 30 == 0) {
+    // Less frequent progress updates
+    if (streamer->frame_id % 60 == 0) {
         printf("Sent frame %d (%zu WebP bytes in %zu packets)\n", 
                streamer->frame_id, webp_size, total_packets);
     }
@@ -227,14 +271,14 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     return 0;
 }
 
-// Main streaming loop (unchanged logic, different encoding)
+// main streaming loop
 int frame_streamer_run_loop(FrameStreamer *streamer) {
     if (!streamer) return -1;
     
     // Set up signal handler for graceful shutdown
     signal(SIGINT, signal_handler);
     
-    printf("Starting WebP streaming loop... Press Ctrl+C to stop\n");
+    printf("Starting optimized WebP streaming loop... Press Ctrl+C to stop\n");
     frame_streamer_print_status(streamer);
     
     // Start frame capture
@@ -269,8 +313,8 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
             break;
         }
         
-        // Small sleep to prevent busy waiting
-        usleep(5000); // 5ms
+        // Minimal sleep - let frame capture handle most timing
+        usleep(500); // Reduced from 5000μs to 500μs
     }
     
     printf("\nStreamed %d WebP frames total\n", streamer->frames_sent);
@@ -286,7 +330,7 @@ int frame_streamer_start(FrameStreamer *streamer) {
         return -1;
     }
     
-    // STEP 2: Send frame info
+    // STEP 2: Send frame info (now includes WebP format)
     if (frame_streamer_send_frame_info(streamer) != 0) {
         return -1;
     }
@@ -295,16 +339,16 @@ int frame_streamer_start(FrameStreamer *streamer) {
     return frame_streamer_run_loop(streamer);
 }
 
-// Print streamer status 
+// Print streamer status with WebP info
 void frame_streamer_print_status(FrameStreamer *streamer) {
     if (!streamer) return;
     
-    printf("Frame Streamer Status (WebP):\n");
+    printf("Optimized Frame Streamer Status (Direct WebP):\n");
     printf("  Streaming: %s\n", streamer->streaming ? "YES" : "NO");
     printf("  Frames sent: %d\n", streamer->frames_sent);
     printf("  Current frame ID: %d\n", streamer->frame_id);
-    printf("  RGB buffer size: %zu bytes\n", streamer->buffer_size);
     printf("  WebP quality: %.1f\n", streamer->webp_quality);
+    printf("  Mode: Direct XImage->WebP (no RGB buffer)\n");
     
     if (streamer->frame_capture) {
         fc_print_frame_info(streamer->frame_capture);
@@ -333,7 +377,6 @@ static int cleanup_display_config(FrameStreamer *streamer) {
     printf("STEP 1: Disabling output '%s'...\n", output_name);
     if (mode_disable_output(dm, output_name) != 0) {
         fprintf(stderr, "Warning: Failed to disable output '%s'\n", output_name);
-        // Continue with cleanup even if disable fails
     } else {
         printf(" Output disabled successfully\n");
     }
@@ -342,7 +385,6 @@ static int cleanup_display_config(FrameStreamer *streamer) {
     printf("STEP 2: Removing mode %lu from output '%s'...\n", mode_id, output_name);
     if (mode_remove_from_output(dm, output_name, mode_id) != 0) {
         fprintf(stderr, "Warning: Failed to remove mode from output '%s'\n", output_name);
-        // Continue with cleanup even if remove fails
     } else {
         printf(" Mode removed from output successfully\n");
     }
@@ -359,7 +401,6 @@ static int cleanup_display_config(FrameStreamer *streamer) {
     return 0;
 }
 
-
 // Stop streaming
 void frame_streamer_stop(FrameStreamer *streamer) {
     if (!streamer) return;
@@ -370,7 +411,7 @@ void frame_streamer_stop(FrameStreamer *streamer) {
     }
 }
 
-// Cleanup resources- calls every other cleanup function 
+// Cleanup resources - no RGB buffer to free
 void frame_streamer_cleanup(FrameStreamer *streamer) {
     if (!streamer) return;
     
@@ -383,11 +424,6 @@ void frame_streamer_cleanup(FrameStreamer *streamer) {
     // Cleanup frame capture
     if (streamer->frame_capture) {
         fc_cleanup(streamer->frame_capture);
-    }
-    
-    // Free RGB buffer
-    if (streamer->rgb_buffer) {
-        free(streamer->rgb_buffer);
     }
     
     free(streamer);

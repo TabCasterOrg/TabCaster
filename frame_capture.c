@@ -128,7 +128,7 @@ FrameCapture* fc_init(DisplayManager *dm, const char *output_name, int fps) {
     if (!fc) return NULL;
     
     fc->dm = dm;
-    fc->target_fps = fps > 0 ? fps : 30;
+    fc->target_fps = fps > 0 ? fps : 30; // Default to 30 FPS if invalid
     fc->frame_interval_us = 1000000 / fc->target_fps;
     strncpy(fc->output_name, output_name, sizeof(fc->output_name) - 1);
     
@@ -219,14 +219,17 @@ int fc_start(FrameCapture *fc) {
 int fc_capture_frame(FrameCapture *fc) {
     if (!fc || !fc->capturing || !fc->current_frame) return -1;
     
-    // Rate limiting - check if enough time has passed
+    // More aggressive rate limiting - allow slight FPS overshoot
     struct timeval now;
     gettimeofday(&now, NULL);
     
     long time_diff = (now.tv_sec - fc->last_capture.tv_sec) * 1000000 +
                      (now.tv_usec - fc->last_capture.tv_usec);
     
-    if (time_diff < fc->frame_interval_us) {
+    // Reduced threshold by 10% for smoother capture
+    long adjusted_interval = fc->frame_interval_us * 0.9;
+    
+    if (time_diff < adjusted_interval) {
         return 0; // Too soon for next frame
     }
     

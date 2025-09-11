@@ -129,7 +129,7 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     }
     
     // No RGB buffer allocation - direct WebP encoding
-    streamer->webp_quality = 100.0f; // Good balance of quality and compression speed
+    streamer->webp_quality = 80.0f; // Good balance of quality and compression speed
     
     printf("Optimized frame streamer initialized for '%s' with direct WebP encoding (quality: %.1f)\n", 
            output_name, streamer->webp_quality);

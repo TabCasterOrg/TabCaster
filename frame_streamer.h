@@ -3,6 +3,7 @@
 
 #include "udp_server.h"
 #include "frame_capture.h"
+#include <webp/encode.h>
 
 
 #include <stdint.h>
@@ -27,6 +28,8 @@ typedef struct {
     bool streaming;
     uint32_t frame_id;
     int frames_sent;
+
+    float webp_quality;        //field for WebP quality (0-100)
     
     // Frame conversion buffer
     unsigned char *rgb_buffer;

@@ -6,7 +6,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
-#include <webp/encode.h>
+#include <png.h>
+#include <setjmp.h>
 
 static volatile bool keep_streaming = true;
 
@@ -16,10 +17,49 @@ static void signal_handler(int sig) {
     keep_streaming = false;
 }
 
+// PNG encoding structure for memory writing
+typedef struct {
+    unsigned char *data;
+    size_t size;
+    size_t allocated;
+    size_t offset;
+} PNGMemoryData;
+
+// PNG write callback for memory
+static void png_write_data_callback(png_structp png_ptr, png_bytep data, png_size_t length) {
+    PNGMemoryData *mem_data = (PNGMemoryData*)png_get_io_ptr(png_ptr);
+    
+    // Ensure we have enough space
+    if (mem_data->offset + length > mem_data->allocated) {
+        size_t new_size = mem_data->allocated * 2;
+        if (new_size < mem_data->offset + length) {
+            new_size = mem_data->offset + length + 4096;
+        }
+        
+        unsigned char *new_data = realloc(mem_data->data, new_size);
+        if (!new_data) {
+            png_error(png_ptr, "Failed to allocate memory for PNG");
+            return;
+        }
+        
+        mem_data->data = new_data;
+        mem_data->allocated = new_size;
+    }
+    
+    memcpy(mem_data->data + mem_data->offset, data, length);
+    mem_data->offset += length;
+    mem_data->size = mem_data->offset;
+}
+
+static void png_flush_callback(png_structp png_ptr) {
+    // No-op for memory writing
+    (void)png_ptr;
+}
+
 // Fallback conversion for uncommon XImage formats
-static int encode_ximage_fallback(XImage *img, unsigned char **webp_data, 
-                                 size_t *webp_size, float quality) {
-    printf("Using fallback XImage conversion for format: depth=%d, bpp=%d\n", 
+static int encode_ximage_fallback_png(XImage *img, unsigned char **png_data, 
+                                     size_t *png_size) {
+    printf("Using fallback XImage conversion for PNG: depth=%d, bpp=%d\n", 
            img->depth, img->bits_per_pixel);
            
     size_t rgb_size = img->width * img->height * 3;
@@ -39,23 +79,79 @@ static int encode_ximage_fallback(XImage *img, unsigned char **webp_data,
         }
     }
     
-    *webp_size = WebPEncodeRGB(rgb_buffer, img->width, img->height, 
-                              img->width * 3, quality, webp_data);
+    // Encode RGB to PNG
+    png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png_ptr) {
+        free(rgb_buffer);
+        return -1;
+    }
     
+    png_infop info_ptr = png_create_info_struct(png_ptr);
+    if (!info_ptr) {
+        png_destroy_write_struct(&png_ptr, NULL);
+        free(rgb_buffer);
+        return -1;
+    }
+    
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        free(rgb_buffer);
+        return -1;
+    }
+    
+    // Set up memory writing
+    PNGMemoryData mem_data = {0};
+    mem_data.allocated = img->width * img->height * 4; // Initial allocation
+    mem_data.data = malloc(mem_data.allocated);
+    if (!mem_data.data) {
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        free(rgb_buffer);
+        return -1;
+    }
+    
+    png_set_write_fn(png_ptr, &mem_data, png_write_data_callback, png_flush_callback);
+    
+    // Set PNG parameters for speed
+    png_set_IHDR(png_ptr, info_ptr, img->width, img->height, 8,
+                 PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
+                 PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+    
+    // Optimize for speed
+    png_set_compression_level(png_ptr, 1); // Fastest compression
+    png_set_filter(png_ptr, 0, PNG_FILTER_NONE); // No filtering for speed
+    
+    png_write_info(png_ptr, info_ptr);
+    
+    // Write image data row by row
+    png_bytep *row_pointers = malloc(sizeof(png_bytep) * img->height);
+    for (int y = 0; y < img->height; y++) {
+        row_pointers[y] = rgb_buffer + (y * img->width * 3);
+    }
+    
+    png_write_image(png_ptr, row_pointers);
+    png_write_end(png_ptr, NULL);
+    
+    // Cleanup
+    free(row_pointers);
+    png_destroy_write_struct(&png_ptr, &info_ptr);
     free(rgb_buffer);
-    return (*webp_size > 0) ? 0 : -1;
+    
+    *png_data = mem_data.data;
+    *png_size = mem_data.size;
+    
+    return 0;
 }
 
-// Direct XImage to WebP conversion
-static int encode_ximage_to_webp(XImage *img, unsigned char **webp_data, 
-                                size_t *webp_size, float quality) {
+// Direct XImage to PNG conversion
+static int encode_ximage_to_png(XImage *img, unsigned char **png_data, 
+                               size_t *png_size) {
     int width = img->width;
     int height = img->height;
     
     // Debug the XImage format for first frame
     static int first_call = 1;
     if (first_call) {
-        printf("XImage format debug:\n");
+        printf("XImage format debug for PNG:\n");
         printf("  Depth: %d, BPP: %d, Byte order: %s\n", 
                img->depth, img->bits_per_pixel, 
                img->byte_order == LSBFirst ? "LSBFirst" : "MSBFirst");
@@ -64,52 +160,99 @@ static int encode_ximage_to_webp(XImage *img, unsigned char **webp_data,
         first_call = 0;
     }
     
+    png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png_ptr) return -1;
+    
+    png_infop info_ptr = png_create_info_struct(png_ptr);
+    if (!info_ptr) {
+        png_destroy_write_struct(&png_ptr, NULL);
+        return -1;
+    }
+    
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        return -1;
+    }
+    
+    // Set up memory writing
+    PNGMemoryData mem_data = {0};
+    mem_data.allocated = width * height * 4; // Initial allocation
+    mem_data.data = malloc(mem_data.allocated);
+    if (!mem_data.data) {
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        return -1;
+    }
+    
+    png_set_write_fn(png_ptr, &mem_data, png_write_data_callback, png_flush_callback);
+    
     // For specific format (24-bit depth, 32 BPP, LSBFirst)
     if (img->depth == 24 && img->bits_per_pixel == 32 && img->byte_order == LSBFirst) {
         // This is BGRX format (Blue, Green, Red, X padding)
-        // X11 typically uses BGRX with red_mask=0xff0000, green_mask=0xff00, blue_mask=0xff
-        
         if (img->red_mask == 0xff0000 && img->green_mask == 0xff00 && img->blue_mask == 0xff) {
-            // Standard BGRX format - convert to RGBA for WebP
-            size_t rgba_size = width * height * 4;
-            unsigned char *rgba_data = malloc(rgba_size);
-            if (!rgba_data) return -1;
+            // Standard BGRX format - convert to RGB for PNG
+            
+            // Set PNG parameters for RGB
+            png_set_IHDR(png_ptr, info_ptr, width, height, 8,
+                         PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
+                         PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+            
+            // Optimize for speed
+            png_set_compression_level(png_ptr, 1); // Fastest compression
+            png_set_filter(png_ptr, 0, PNG_FILTER_NONE); // No filtering for speed
+            
+            png_write_info(png_ptr, info_ptr);
+            
+            // Convert and write data row by row
+            unsigned char *row_buffer = malloc(width * 3);
+            if (!row_buffer) {
+                png_destroy_write_struct(&png_ptr, &info_ptr);
+                free(mem_data.data);
+                return -1;
+            }
             
             unsigned char *src = (unsigned char*)img->data;
-            unsigned char *dst = rgba_data;
             
             for (int y = 0; y < height; y++) {
                 unsigned char *line_src = src + (y * img->bytes_per_line);
+                
                 for (int x = 0; x < width; x++) {
-                    // BGRX → RGBA conversion
+                    // BGRX → RGB conversion
                     unsigned char b = line_src[x * 4 + 0];
                     unsigned char g = line_src[x * 4 + 1];
                     unsigned char r = line_src[x * 4 + 2];
                     // Skip X (padding byte at line_src[x * 4 + 3])
                     
-                    dst[(y * width + x) * 4 + 0] = r; // R
-                    dst[(y * width + x) * 4 + 1] = g; // G
-                    dst[(y * width + x) * 4 + 2] = b; // B
-                    dst[(y * width + x) * 4 + 3] = 255; // A (fully opaque)
+                    row_buffer[x * 3 + 0] = r; // R
+                    row_buffer[x * 3 + 1] = g; // G
+                    row_buffer[x * 3 + 2] = b; // B
                 }
+                
+                png_write_row(png_ptr, row_buffer);
             }
             
-            // Encode RGBA to WebP
-            *webp_size = WebPEncodeRGBA(rgba_data, width, height, width * 4, quality, webp_data);
-            free(rgba_data);
+            free(row_buffer);
             
         } else {
             // Non-standard masks - use pixel-by-pixel conversion
-            return encode_ximage_fallback(img, webp_data, webp_size, quality);
+            png_destroy_write_struct(&png_ptr, &info_ptr);
+            free(mem_data.data);
+            return encode_ximage_fallback_png(img, png_data, png_size);
         }
     } else {
         // Other formats - use fallback
-        return encode_ximage_fallback(img, webp_data, webp_size, quality);
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        free(mem_data.data);
+        return encode_ximage_fallback_png(img, png_data, png_size);
     }
     
-    return (*webp_size > 0) ? 0 : -1;
+    png_write_end(png_ptr, NULL);
+    png_destroy_write_struct(&png_ptr, &info_ptr);
+    
+    *png_data = mem_data.data;
+    *png_size = mem_data.size;
+    
+    return 0;
 }
-
 
 // Initialize frame streamer 
 FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_name, int fps) {
@@ -128,11 +271,7 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
         return NULL;
     }
     
-    // No RGB buffer allocation - direct WebP encoding
-    streamer->webp_quality = 80.0f; // Good balance of quality and compression speed
-    
-    printf("Optimized frame streamer initialized for '%s' with direct WebP encoding (quality: %.1f)\n", 
-           output_name, streamer->webp_quality);
+    printf("Optimized frame streamer initialized for '%s' with direct PNG encoding\n", output_name);
     return streamer;
 }
 
@@ -173,7 +312,7 @@ int frame_streamer_wait_for_start_command(FrameStreamer *streamer) {
     }
 }
 
-// Send frame info to client - indicates WebP format
+// Send frame info to client - indicates PNG format
 int frame_streamer_send_frame_info(FrameStreamer *streamer) {
     if (!streamer) return -1;
     
@@ -182,14 +321,14 @@ int frame_streamer_send_frame_info(FrameStreamer *streamer) {
     
     // Include format information
     char info_packet[64];
-    snprintf(info_packet, sizeof(info_packet), "INFO:%d:%d:WEBP", 
+    snprintf(info_packet, sizeof(info_packet), "INFO:%d:%d:PNG", 
              client->width, client->height);
     
     if (udp_server_send_response(server, info_packet) != 0) {
         return -1;
     }
     
-    printf("Sent frame info: %dx%d WebP format\n", client->width, client->height);
+    printf("Sent frame info: %dx%d PNG format\n", client->width, client->height);
     
     // Small delay to ensure client receives frame info before data packets
     usleep(10000); // 10ms delay
@@ -197,38 +336,38 @@ int frame_streamer_send_frame_info(FrameStreamer *streamer) {
     return 0;
 }
 
-// Optimized frame sending with direct WebP encoding
+// Optimized frame sending with direct PNG encoding
 int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     if (!streamer || !frame) return -1;
     
     UDPServer *server = streamer->udp_server;
     ClientInfo *client = udp_server_get_client(server);
     
-    // Direct XImage to WebP conversion - no intermediate RGB buffer
-    unsigned char *webp_data = NULL;
-    size_t webp_size = 0;
+    // Direct XImage to PNG conversion
+    unsigned char *png_data = NULL;
+    size_t png_size = 0;
     
-    if (encode_ximage_to_webp(frame, &webp_data, &webp_size, streamer->webp_quality) != 0) {
-        fprintf(stderr, "Failed to encode frame %d to WebP\n", streamer->frame_id);
+    if (encode_ximage_to_png(frame, &png_data, &png_size) != 0) {
+        fprintf(stderr, "Failed to encode frame %d to PNG\n", streamer->frame_id);
         return -1;
     }
     
     // Calculate packet info
     size_t data_per_packet = MAX_PACKET_SIZE - sizeof(PacketHeader);
-    size_t total_packets = (webp_size + data_per_packet - 1) / data_per_packet;
+    size_t total_packets = (png_size + data_per_packet - 1) / data_per_packet;
     
     // Debug info for first few frames only
     if (streamer->frame_id < 3) {
         size_t estimated_rgb_size = frame->width * frame->height * 3;
-        float compression_ratio = (float)estimated_rgb_size / webp_size;
-        printf("Frame %d: %dx%d -> WebP(%zu bytes) = %.1fx compression, %zu packets\n",
+        float compression_ratio = (float)estimated_rgb_size / png_size;
+        printf("Frame %d: %dx%d -> PNG(%zu bytes) = %.1fx compression, %zu packets\n",
                streamer->frame_id, frame->width, frame->height, 
-               webp_size, compression_ratio, total_packets);
+               png_size, compression_ratio, total_packets);
     }
     
     // Send all packets with minimal delays
     for (size_t packet_id = 0; packet_id < total_packets; packet_id++) {
-        size_t remaining = webp_size - (packet_id * data_per_packet);
+        size_t remaining = png_size - (packet_id * data_per_packet);
         size_t current_data_size = (remaining > data_per_packet) ? data_per_packet : remaining;
         
         char packet[MAX_PACKET_SIZE];
@@ -240,7 +379,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
         header->data_size = htonl(current_data_size);
         
         memcpy(packet + sizeof(PacketHeader), 
-               webp_data + (packet_id * data_per_packet), 
+               png_data + (packet_id * data_per_packet), 
                current_data_size);
         
         ssize_t packet_size = sizeof(PacketHeader) + current_data_size;
@@ -250,7 +389,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
         
         if (bytes_sent < 0) {
             perror("Failed to send packet");
-            WebPFree(webp_data);
+            free(png_data);
             return -1;
         }
         
@@ -260,12 +399,12 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
         }
     }
     
-    WebPFree(webp_data);
+    free(png_data);
     
     // Less frequent progress updates
     if (streamer->frame_id % 60 == 0) {
-        printf("Sent frame %d (%zu WebP bytes in %zu packets)\n", 
-               streamer->frame_id, webp_size, total_packets);
+        printf("Sent frame %d (%zu PNG bytes in %zu packets)\n", 
+               streamer->frame_id, png_size, total_packets);
     }
     
     return 0;
@@ -278,7 +417,7 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
     // Set up signal handler for graceful shutdown
     signal(SIGINT, signal_handler);
     
-    printf("Starting optimized WebP streaming loop... Press Ctrl+C to stop\n");
+    printf("Starting optimized PNG streaming loop... Press Ctrl+C to stop\n");
     frame_streamer_print_status(streamer);
     
     // Start frame capture
@@ -300,10 +439,10 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
                     streamer->frame_id++;
                     
                     if (streamer->frames_sent % 60 == 0) {
-                        printf("Sent %d WebP frames\n", streamer->frames_sent);
+                        printf("Sent %d PNG frames\n", streamer->frames_sent);
                     }
                 } else {
-                    fprintf(stderr, "Failed to send WebP frame %d\n", streamer->frame_id);
+                    fprintf(stderr, "Failed to send PNG frame %d\n", streamer->frame_id);
                 }
                 
                 fc_mark_frame_processed(streamer->frame_capture);
@@ -317,7 +456,7 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
         usleep(500); // Reduced from 5000μs to 500μs
     }
     
-    printf("\nStreamed %d WebP frames total\n", streamer->frames_sent);
+    printf("\nStreamed %d PNG frames total\n", streamer->frames_sent);
     return 0;
 }
 
@@ -330,7 +469,7 @@ int frame_streamer_start(FrameStreamer *streamer) {
         return -1;
     }
     
-    // STEP 2: Send frame info (now includes WebP format)
+    // STEP 2: Send frame info (now includes PNG format)
     if (frame_streamer_send_frame_info(streamer) != 0) {
         return -1;
     }
@@ -339,16 +478,15 @@ int frame_streamer_start(FrameStreamer *streamer) {
     return frame_streamer_run_loop(streamer);
 }
 
-// Print streamer status with WebP info
+// Print streamer status with PNG info
 void frame_streamer_print_status(FrameStreamer *streamer) {
     if (!streamer) return;
     
-    printf("Optimized Frame Streamer Status (Direct WebP):\n");
+    printf("Optimized Frame Streamer Status (Direct PNG):\n");
     printf("  Streaming: %s\n", streamer->streaming ? "YES" : "NO");
     printf("  Frames sent: %d\n", streamer->frames_sent);
     printf("  Current frame ID: %d\n", streamer->frame_id);
-    printf("  WebP quality: %.1f\n", streamer->webp_quality);
-    printf("  Mode: Direct XImage->WebP (no RGB buffer)\n");
+    printf("  Mode: Direct XImage->PNG (lossless, fast decode)\n");
     
     if (streamer->frame_capture) {
         fc_print_frame_info(streamer->frame_capture);
@@ -411,7 +549,7 @@ void frame_streamer_stop(FrameStreamer *streamer) {
     }
 }
 
-// Cleanup resources - no RGB buffer to free
+// Cleanup resources
 void frame_streamer_cleanup(FrameStreamer *streamer) {
     if (!streamer) return;
     

@@ -94,12 +94,6 @@ int dm_count_connected_screens(DisplayManager *dm) {
     return connected;
 }
 
-// Utility function to count disconnected screens
-int dm_count_disconnected_screens(DisplayManager *dm) {
-    if (!dm || !dm->screens) return 0;
-    
-    return dm->screen_count - dm_count_connected_screens(dm);
-}
 
 // Get pointer to primary screen (returns NULL if no primary found)
 ScreenInfo* dm_get_primary_screen(DisplayManager *dm) {
@@ -115,28 +109,43 @@ ScreenInfo* dm_get_primary_screen(DisplayManager *dm) {
 
 // Main function - enumerate and populate all screens
 int dm_get_screens(DisplayManager *dm) {
-    if (!dm || !dm->resources) return -1;
-    
+    if (!dm) return -1;
+
+    // Refresh XRandR resources to reflect current system state
+    XRRScreenResources *fresh = XRRGetScreenResources(dm->display, dm->root);
+    if (!fresh) return -1;
+
+    // Free previous resources and arrays
+    if (dm->resources) {
+        XRRFreeScreenResources(dm->resources);
+    }
+    dm->resources = fresh;
+
+    if (dm->screens) {
+        free(dm->screens);
+        dm->screens = NULL;
+    }
+
     // Allocate space for all outputs
     int max_screens = allocate_screen_array(dm);
     if (max_screens <= 0) return max_screens;
-    
+
     dm->screen_count = 0;
-    
+
     // Process each output
     for (int i = 0; i < dm->resources->noutput; i++) {
-        XRROutputInfo *output_info = XRRGetOutputInfo(dm->display, 
-                                                      dm->resources, 
+        XRROutputInfo *output_info = XRRGetOutputInfo(dm->display,
+                                                      dm->resources,
                                                       dm->resources->outputs[i]);
         if (!output_info) continue;
-        
+
         ScreenInfo *screen = &dm->screens[dm->screen_count];
         populate_screen_info(dm, screen, dm->resources->outputs[i], output_info);
-        
+
         XRRFreeOutputInfo(output_info);
         dm->screen_count++;
     }
-    
+
     // Return count of connected screens (calculated after population)
     return dm_count_connected_screens(dm);
 }

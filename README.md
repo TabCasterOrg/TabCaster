@@ -100,3 +100,41 @@ Examples:
 - Make sure the binary is executable: `chmod +x tabcaster`
 
 The program will automatically detect all connected monitors and display their configuration - no command line arguments needed.
+
+## Delta-based streaming protocol (raw RGB)
+
+The server now sends only changed regions using XDamage:
+
+- Persistent bitmap: the client maintains a full-size RGB framebuffer.
+- Deltas: when regions change, the server sends one or more rectangular RGB updates.
+- Keyframes: periodic full-frame tiles are sent to re-sync.
+
+### Packet format
+
+```
+struct PacketHeader {           // packed
+  uint32_t frame_id;           // monotonically increasing
+  uint16_t x, y;               // coordinates relative to capture origin (0..W/H)
+  uint16_t w, h;               // rect size
+  uint8_t  is_keyframe;        // 1 = keyframe, 0 = delta
+  uint8_t  reserved[3];
+  uint32_t data_size;          // bytes following, RGB24
+};
+// followed by data_size bytes of RGB24 for the rectangle
+```
+
+- Max UDP packet size is `MAX_PACKET_SIZE` (default 1400). Large rects are tiled vertically.
+- Coordinates are absolute; clients should blit at `(x, y)` into their persistent buffer.
+
+### Client expectations
+
+- Allocate persistent RGB24 buffer of the reported display size.
+- On receiving a packet:
+  - If `is_keyframe == 1`: overwrite destination region.
+  - Else: apply patch to the region.
+- Occasionally the server sends keyframes (default every ~4s). Clients can request a keyframe by disconnect/reconnect if needed.
+
+### Notes
+
+- Cursor is composited server-side via XFixes if available.
+- XDamage is used to minimize bandwidth and latency.

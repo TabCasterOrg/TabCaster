@@ -198,7 +198,7 @@ int udp_server_create_display_for_client(UDPServer *server, const char *target_o
     printf("Target output: %s\n", target_output);
     printf("Requested resolution: %ux%u @ %.2f Hz\n", 
            client->width, client->height, client->refresh_rate);
-    printf("Auto-positioning: LEFT OF PRIMARY\n");
+    printf("Auto-positioning: RIGHT OF PRIMARY\n");
     
     // First, try the client's requested resolution
     printf("\n--- Trying client's requested resolution ---\n");
@@ -218,16 +218,15 @@ int udp_server_create_display_for_client(UDPServer *server, const char *target_o
         unsigned int width = fallback_resolutions[i].width;
         unsigned int height = fallback_resolutions[i].height;
         double refresh_rate = fallback_resolutions[i].refresh_rate;
-        printf("Trying resolution: %ux%u",width,height);
+        printf("Trying resolution: %ux%u\n", width, height);
         bool validRefreshRate = fabs(refresh_rate - client->refresh_rate) < 0.1;
-        printf("The refresh rate is valid: %u", validRefreshRate);
         // Skip if it's the same as what we already tried
         if (width == client->width && height == client->height && validRefreshRate) {
             printf("Skipping %ux%u @ %.1f Hz (already tried)\n", width, height, refresh_rate);
             continue;
         }
         
-        printf("\nFallback %zu/%zu: ", i + 1, num_fallback_resolutions);
+        printf("Fallback %zu/%zu: ", i + 1, num_fallback_resolutions);
         if (udp_server_try_resolution(server, target_output, width, height, refresh_rate) == 0) {
             printf("✓ Fallback resolution %ux%u @ %.1f Hz works!\n", width, height, refresh_rate);
             

@@ -7,8 +7,8 @@
 // Global flag for tracking X11 errors during mode operations
 static volatile int x11_operation_failed = 0;
 
-// Temp error handler that sets a flag for critical operations
-int ignore_badmatch_with_flag(Display *d, XErrorEvent *e) {
+// Temp error handler that sets a flag for critical operations (file-local)
+static int ignore_badmatch_with_flag(Display *d, XErrorEvent *e) {
     if (e->error_code == BadMatch) {
         printf("Found an X11 BadMatch error. Continuing.\n");
         x11_operation_failed = 1; // Set flag
@@ -399,20 +399,6 @@ int mode_delete_from_xrandr(DisplayManager *dm, RRMode mode_id) {
     return 0;
 }
 
-// Print libxcvt mode info in readable format
-void mode_print_libxcvt_info(const struct libxcvt_mode_info *cvt_mode, double refresh_rate) {
-    if (!cvt_mode) return;
-    
-    printf("# %dx%d %.2f Hz (CVT) hsync: %.2f kHz; pclk: %.3f MHz\n",
-           cvt_mode->hdisplay, cvt_mode->vdisplay, refresh_rate,
-           cvt_mode->dot_clock / (double)cvt_mode->htotal, cvt_mode->dot_clock / 1000.0);
-    printf("Modeline \"%dx%d_%.2f\" %.3f %d %d %d %d %d %d %d %d %shsync %svsync\n",
-           cvt_mode->hdisplay, cvt_mode->vdisplay, refresh_rate, cvt_mode->dot_clock / 1000.0,
-           cvt_mode->hdisplay, cvt_mode->hsync_start, cvt_mode->hsync_end, cvt_mode->htotal,
-           cvt_mode->vdisplay, cvt_mode->vsync_start, cvt_mode->vsync_end, cvt_mode->vtotal,
-           (cvt_mode->mode_flags & LIBXCVT_MODE_FLAG_HSYNC_POSITIVE) ? "+" : "-",
-           (cvt_mode->mode_flags & LIBXCVT_MODE_FLAG_VSYNC_POSITIVE) ? "+" : "-");
-}
 
 // Find mode ID by name in current XRandR configuration
 RRMode mode_find_by_name(DisplayManager *dm, const char *mode_name) {

@@ -36,7 +36,7 @@ void dm_cleanup(DisplayManager *dm);              // Clean up resources - safe t
 
 // Utility functions for working with screen data
 int dm_count_connected_screens(DisplayManager *dm);     // Count currently connected screens
-int dm_count_disconnected_screens(DisplayManager *dm);  // Count currently disconnected screens
+// (removed) dm_count_disconnected_screens - unused
 ScreenInfo* dm_get_primary_screen(DisplayManager *dm);  // Get pointer to primary screen (NULL if none)
 
 #endif

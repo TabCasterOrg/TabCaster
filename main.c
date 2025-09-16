@@ -318,8 +318,7 @@ int stream_with_resolution_exchange(DisplayManager *dm, const char *output_name,
 // Main entry point with command line argument parsing
 int main(int argc, char *argv[]) {
     printf("Tabcaster - C Version with Output Management\n");
-    // Initialize X11 error handling TEMP DEBUG
-    XSetErrorHandler(ignore_badmatch_with_flag);
+    // Initialize X11 error handling is internal to mode manager now
     
     // Parse command line arguments
     bool list_mode = false;

@@ -17,7 +17,7 @@ int mode_delete_from_xrandr(DisplayManager *dm, RRMode mode_id);
 
 // Mode search and information
 RRMode mode_find_by_name(DisplayManager *dm, const char *mode_name);
-void mode_print_libxcvt_info(const struct libxcvt_mode_info *cvt_mode, double refresh_rate);
+// (removed) mode_print_libxcvt_info - unused
 void mode_print_output_modes(DisplayManager *dm, const char *output_name);
 void mode_print_all_output_modes(DisplayManager *dm);
 
@@ -47,9 +47,6 @@ int mode_calculate_right_of_position(DisplayManager *dm, int *x, int *y,
                                    unsigned int width, unsigned int height);
 int mode_expand_desktop_for_screens(DisplayManager *dm);
 
-// Error handler for X11
-// X11 error handler with flag setting TEMP DEBUG
-void mode_manager_init_error_handling(void);
-int ignore_badmatch_with_flag(Display *d, XErrorEvent *e);
+// (internal) Error handler is file-local in implementation
 
 #endif // MODE_MANAGER_H

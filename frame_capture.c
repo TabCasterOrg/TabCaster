@@ -342,6 +342,13 @@ void fc_cleanup(FrameCapture *fc) {
     if (!fc) return;
     
     fc_stop(fc);
+
+    // Destroy damage tracking
+    if (fc->damage_enabled && fc->damage_handle) {
+        XDamageDestroy(fc->dm->display, fc->damage_handle);
+        fc->damage_handle = 0;
+        fc->damage_enabled = false;
+    }
     
     if (fc->current_frame) {
         XDestroyImage(fc->current_frame);
@@ -355,4 +362,94 @@ void fc_cleanup(FrameCapture *fc) {
     
     printf("XShm resources cleaned up\n");
     free(fc);
+}
+
+// Initialize XDamage tracking on the root window for our capture region
+int fc_init_damage(FrameCapture *fc) {
+    if (!fc || !fc->dm) return -1;
+
+    if (!XDamageQueryExtension(fc->dm->display, &fc->xdamage_event_base, &fc->xdamage_error_base)) {
+        printf("XDamage extension not available - delta streaming disabled\n");
+        fc->damage_enabled = false;
+        return 0;
+    }
+
+    // Track damage on the root; we will filter rects to our region later
+    fc->damage_handle = XDamageCreate(fc->dm->display, fc->dm->root, XDamageReportDeltaRectangles);
+    if (!fc->damage_handle) {
+        fprintf(stderr, "Failed to create XDamage handle\n");
+        return -1;
+    }
+
+    fc->damage_enabled = true;
+    printf("XDamage initialized (base=%d)\n", fc->xdamage_event_base);
+    return 0;
+}
+
+// Retrieve and coalesce damage since last call
+int fc_get_damage_rects(FrameCapture *fc, XRectangle **rects_out, int *num_rects_out) {
+    if (!fc || !rects_out || !num_rects_out) return -1;
+    *rects_out = NULL;
+    *num_rects_out = 0;
+    if (!fc->damage_enabled || !fc->damage_handle) return 0;
+
+    XserverRegion region = XFixesCreateRegion(fc->dm->display, NULL, 0);
+    if (!region) return -1;
+
+    // Subtract to get accumulated damage and reset
+    XDamageSubtract(fc->dm->display, fc->damage_handle, None, region);
+
+    int nrects = 0;
+    XRectangle *rects = XFixesFetchRegion(fc->dm->display, region, &nrects);
+    XFixesDestroyRegion(fc->dm->display, region);
+
+    if (!rects || nrects <= 0) {
+        if (rects) XFree(rects);
+        return 0;
+    }
+
+    // Clip rects to our capture area
+    int rx = fc->x;
+    int ry = fc->y;
+    unsigned int rw = fc->width;
+    unsigned int rh = fc->height;
+
+    int write_idx = 0;
+    // Coalesce simple adjacent rectangles horizontally to reduce packet count
+    for (int i = 0; i < nrects; i++) {
+        int x1 = rects[i].x;
+        int y1 = rects[i].y;
+        int x2 = x1 + (int)rects[i].width;
+        int y2 = y1 + (int)rects[i].height;
+
+        // Intersect with capture rect
+        int ix1 = x1 < rx ? rx : x1;
+        int iy1 = y1 < ry ? ry : y1;
+        int ix2 = x2 > (rx + (int)rw) ? (rx + (int)rw) : x2;
+        int iy2 = y2 > (ry + (int)rh) ? (ry + (int)rh) : y2;
+
+        if (ix2 > ix1 && iy2 > iy1) {
+            // Try merge with previous if same row and touching
+            if (write_idx > 0) {
+                XRectangle *prev = &rects[write_idx - 1];
+                if (prev->y == (short)iy1 && prev->height == (unsigned short)(iy2 - iy1) &&
+                    (prev->x + prev->width) == (unsigned short)ix1) {
+                    prev->width = (unsigned short)((ix2 - prev->x));
+                    continue;
+                }
+            }
+            rects[write_idx].x = (short)ix1;
+            rects[write_idx].y = (short)iy1;
+            rects[write_idx].width = (unsigned short)(ix2 - ix1);
+            rects[write_idx].height = (unsigned short)(iy2 - iy1);
+            write_idx++;
+        }
+    }
+
+    // Hard cap number of rects to avoid storms
+    if (write_idx > MAX_RECTS_PER_FRAME) write_idx = MAX_RECTS_PER_FRAME;
+
+    *rects_out = rects;
+    *num_rects_out = write_idx;
+    return 0;
 }

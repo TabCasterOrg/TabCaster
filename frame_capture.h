@@ -4,9 +4,11 @@
 #include "display_manager.h"
 #include <X11/extensions/Xfixes.h>
 #include <X11/extensions/XShm.h>
+#include <X11/extensions/Xdamage.h>
 #include <sys/time.h>
 #include <stdbool.h>
 
+#define MAX_RECTS_PER_FRAME 256  
 // Frame capture structure - using XShmGetImage
 typedef struct {
     DisplayManager *dm;
@@ -31,6 +33,12 @@ typedef struct {
     bool capture_cursor;
     int xfixes_event_base;
     int xfixes_error_base;
+
+    // Damage tracking
+    bool damage_enabled;
+    int xdamage_event_base;
+    int xdamage_error_base;
+    Damage damage_handle;
 } FrameCapture;
 
 // Core functions
@@ -51,5 +59,10 @@ void fc_print_frame_info(FrameCapture *fc);
 
 // Cursor compositing
 void fc_composite_cursor(FrameCapture *fc);
+
+// Damage tracking
+int fc_init_damage(FrameCapture *fc);
+// Fetch damage rects since last call. Caller must XFree the returned rects via XFree.
+int fc_get_damage_rects(FrameCapture *fc, XRectangle **rects_out, int *num_rects_out);
 
 #endif // FRAME_CAPTURE_H

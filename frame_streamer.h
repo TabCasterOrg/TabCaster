@@ -57,6 +57,9 @@ typedef struct {
     int diff_threshold;         // pixel difference sum threshold per pixel (default 30)
     int cover_threshold_pct;    // max changed coverage percentage for delta (default 80)
     int keyframe_interval;      // send full keyframe every N frames when coverage high (default 120)
+
+    // Keyframe cadence based on captures (independent of sends)
+    int captures_since_keyframe;
 } FrameStreamer;
 
 // Core functions

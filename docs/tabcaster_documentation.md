@@ -1767,3 +1767,91 @@ diff xrandr_before.txt xrandr_after.txt
 | "Failed to send packet" | -1 | Network error | Check network connectivity |
 
 This comprehensive documentation provides detailed information about every function, parameter, return value, and usage example in the Tabcaster codebase. Each module is thoroughly documented with practical examples and troubleshooting guidance.
+
+---
+
+## Delta Streaming Mode
+
+Delta streaming reduces bandwidth by sending only changed rectangular regions relative to a persistent reference frame maintained on both server and client.
+
+### Enable and Tune
+
+CLI flags (used with `--stream`):
+- `--delta`: Enable delta mode
+- `--delta-thresh N`: Per-pixel sum absolute RGB difference threshold (default 30)
+- `--delta-cover N`: Maximum changed coverage percent before treating as keyframe (default 80)
+- `--delta-keyint N`: Keyframe interval in captures (default 120)
+
+Environment variables (alternative):
+- `TABC_DELTA=1`
+- `TABC_THRESH=30`
+- `TABC_COVER=80`
+- `TABC_KEYINT=120`
+
+Examples:
+```bash
+tabcaster --stream HDMI-1 --delta
+tabcaster --stream HDMI-1 --delta --delta-thresh 40 --delta-cover 60 --delta-keyint 120
+```
+
+### Protocol Changes
+
+Frame info:
+- `INFO:<width>:<height>:PNG:DELTA` (`:DELTA` suffix present when delta enabled)
+
+Full-frame packets:
+- Unchanged from PNG mode: data split into packets with 16-byte header:
+```c
+typedef struct __attribute__((packed)) {
+    uint32_t frame_id;      // network byte order
+    uint32_t packet_id;     // network byte order
+    uint32_t total_packets; // network byte order
+    uint32_t data_size;     // network byte order
+} PacketHeader;
+```
+
+Delta region packets:
+- Payload begins with magic `DREG` followed by packed region header and PNG bytes of the region.
+
+Region header (packed, network byte order for 16-bit fields):
+```c
+// Magic: 'D','R','E','G' (4 bytes)
+uint16_t x;
+uint16_t y;
+uint16_t width;
+uint16_t height;
+uint8_t  flags;   // bit0: keyframe flag (reserved), bit1: allow_lossy (reserved)
+uint8_t  quality; // 0-100 (hint; PNG currently ignores)
+uint16_t reserved;
+```
+The entire `DREG` payload is then fragmented into standard packets using the same `PacketHeader`.
+
+### Server Behavior
+
+- Maintains an RGB reference buffer matching the captured frame size.
+- On each capture:
+  - If delta is enabled and it is NOT the first frame, compute a bounding rectangle of changed pixels using absolute RGB sum difference.
+  - If no change: skip sending.
+  - If coverage ≤ `--delta-cover`: encode the region as PNG and send as `DREG`.
+  - If coverage > `--delta-cover`: send a full keyframe only when the capture count since last keyframe reaches `--delta-keyint`; otherwise update the reference buffer and skip.
+  - First frame is always sent as a full keyframe.
+
+### Client Behavior
+
+- On `INFO:...:PNG[:DELTA]`, sets frame size and notes delta capability.
+- Reassembles packets per frame. When the payload starts with `DREG`:
+  - Parses region header, decodes region PNG off the UI thread, converts to software-backed bitmap if needed.
+  - Draws onto a persistent base `Bitmap` at `(x,y)` and updates the `ImageView`.
+- For full-frame PNG, decodes and displays as before (also refreshing the base bitmap).
+
+### Troubleshooting for Delta Mode
+
+- Black screen after idle then partial repaint:
+  - Use periodic keyframes: `--delta-keyint 90`
+  - Lower coverage threshold so large changes trigger keyframes sooner: `--delta-cover 50`
+- Delta enabled but still sending full frames continuously:
+  - Verify server log shows: `delta ENABLED | thresh=... cover=... keyint=...`
+  - Increase `--delta-thresh` (e.g., 40–60) to ignore noise; decrease `--delta-cover` (e.g., 40–60)
+  - Ensure client shows `Frame info received: WxH (PNG+DELTA)`
+- Android error "software rendering doesn’t support hardware bitmaps":
+  - Client copies region bitmaps to software-backed ARGB_8888 before drawing.

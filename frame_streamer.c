@@ -389,6 +389,8 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     if (cov_env) streamer->cover_threshold_pct = atoi(cov_env);
     if (key_env) streamer->keyframe_interval = atoi(key_env);
 
+    streamer->captures_since_keyframe = 0;
+
     printf("Optimized frame streamer initialized for '%s' | delta %s | thresh=%d cover=%d%% keyint=%d\n",
            output_name,
            streamer->delta_mode_enabled ? "ENABLED" : "DISABLED",
@@ -603,8 +605,8 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
 
                 return 0; // sent delta region
             } else {
-                // Coverage too high; send keyframe only at configured interval
-                if (streamer->keyframe_interval > 0 && (streamer->frame_id % streamer->keyframe_interval) != 0) {
+                // Coverage too high; send keyframe only at configured interval (based on captures since last keyframe)
+                if (streamer->keyframe_interval > 0 && streamer->captures_since_keyframe % streamer->keyframe_interval != 0) {
                     // Update reference with current full frame but SKIP sending to save bandwidth
                     if (streamer->reference_frame_rgb) {
                         unsigned char *src2 = (unsigned char*)frame->data;
@@ -711,6 +713,8 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
         printf("Sent frame %d (%zu PNG bytes in %zu packets)\n", 
                streamer->frame_id, png_size, total_packets);
     }
+    // Reset keyframe cadence counter after a full frame
+    streamer->captures_since_keyframe = 0;
     
     return 0;
 }
@@ -743,12 +747,16 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
                 if (send_result == 0) {
                     streamer->frames_sent++;
                     streamer->frame_id++;
+                    streamer->captures_since_keyframe = 0;
                     
                     if (streamer->frames_sent % 60 == 0) {
                         printf("Sent %d PNG frames\n", streamer->frames_sent);
                     }
                 } else if (send_result < 0) {
                     fprintf(stderr, "Failed to send frame %d\n", streamer->frame_id);
+                } else {
+                    // Skipped send: increment cadence counter
+                    streamer->captures_since_keyframe++;
                 }
                 
                 fc_mark_frame_processed(streamer->frame_capture);

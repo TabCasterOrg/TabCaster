@@ -10,7 +10,6 @@
 #define MAX_PACKET_SIZE 1400
 #define DEFAULT_TILE_SIZE 128
 #define MIN_CHANGE_PIXELS 4096
-#define MAX_RECTS_PER_FRAME 64
 
 // Delta packet header for raw RGB updates
 // keyframe: send whole frame as one or multiple tiles

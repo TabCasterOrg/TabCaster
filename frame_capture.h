@@ -8,7 +8,8 @@
 #include <sys/time.h>
 #include <stdbool.h>
 
-#define MAX_RECTS_PER_FRAME 256  
+#define MAX_RECTS_PER_FRAME 64
+
 // Frame capture structure - using XShmGetImage
 typedef struct {
     DisplayManager *dm;

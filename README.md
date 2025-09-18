@@ -103,7 +103,7 @@ The program will automatically detect all connected monitors and display their c
 
 ## Delta-based streaming protocol (raw RGB)
 
-The server now sends only changed regions using XDamage:
+The server now sends only changed regions using XOR-based damage tracking:
 
 - Persistent bitmap: the client maintains a full-size RGB framebuffer.
 - Deltas: when regions change, the server sends one or more rectangular RGB updates.
@@ -137,4 +137,4 @@ struct PacketHeader {           // packed
 ### Notes
 
 - Cursor is composited server-side via XFixes if available.
-- XDamage is used to minimize bandwidth and latency.
+- XOR-based damage tracking is used to minimize bandwidth and latency by comparing pixel values between frames.

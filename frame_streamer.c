@@ -1,6 +1,7 @@
 #include "frame_streamer.h"
 #include "udp_server.h"
 #include "mode_manager.h"
+#include "damage_tracker.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,7 +73,7 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     
     // Configure keyframe cadence (~4s by frame count and 10s as time fallback)
     streamer->keyframe_interval = fps > 0 ? (fps * 4) : 120;
-    streamer->since_keyframe = 0;
+    streamer->since_keyframe = streamer->keyframe_interval; // Force first frame as keyframe
     gettimeofday(&streamer->last_keyframe_time, NULL);
     streamer->keyframe_period_us = 10000000L; // 10 seconds
 
@@ -266,6 +267,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     if (!streamer || !frame) return -1;
 
     bool force_keyframe = (streamer->since_keyframe >= streamer->keyframe_interval);
+    
     // Also force keyframe if enough time elapsed
     struct timeval now_kf;
     gettimeofday(&now_kf, NULL);
@@ -274,36 +276,49 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     if (since_kf_us >= streamer->keyframe_period_us) {
         force_keyframe = true;
     }
-    if (!fc_has_new_frame(streamer->frame_capture)) return 0;
-
-    // Gather damage
-    XRectangle *rects = NULL;
-    int nrects = 0;
-    if (!force_keyframe) {
-        fc_get_damage_rects(streamer->frame_capture, &rects, &nrects);
-    }
 
     int result = 0;
-    if (force_keyframe || nrects <= 0) {
+    
+    if (force_keyframe) {
         // Send a keyframe in tiles to respect MTU
         result = send_rect_packet(streamer, frame, streamer->frame_capture->x, streamer->frame_capture->y,
                                   (int)frame->width, (int)frame->height, true);
         streamer->since_keyframe = 0;
         streamer->last_keyframe_time = now_kf;
-    } else {
-        // Send each damaged rect (already in absolute coords). Optionally coalesce further if needed
-        // Filter out tiny changes to reduce packet storms
-        for (int i = 0; i < nrects && result == 0; i++) {
-            int area = rects[i].width * rects[i].height;
-            if (area < MIN_CHANGE_PIXELS) continue;
-            result = send_rect_packet(streamer, frame,
-                                      rects[i].x, rects[i].y,
-                                      rects[i].width, rects[i].height, false);
+        printf("Sent keyframe: %dx%d\n", frame->width, frame->height);
+    } else if (streamer->frame_capture->damage_enabled) {
+        // Get current damage rectangles
+        DamageRect *rects = NULL;
+        int nrects = 0;
+        if (fc_get_damage_rects(streamer->frame_capture, &rects, &nrects) == 0 && nrects > 0) {
+            // Send each damaged rect
+            int rects_sent = 0;
+            for (int i = 0; i < nrects && result == 0; i++) {
+                int area = rects[i].width * rects[i].height;
+                if (area < MIN_CHANGE_PIXELS) continue;
+                if (rects_sent >= MAX_RECTS_PER_FRAME) break;
+                
+                result = send_rect_packet(streamer, frame,
+                                          rects[i].x, rects[i].y,
+                                          rects[i].width, rects[i].height, false);
+                rects_sent++;
+            }
+            
+            if (rects_sent > 0) {
+                printf("Sent %d damage rects\n", rects_sent);
+                streamer->since_keyframe++;
+            }
+        } else {
+            // No damage, don't send anything
+            return 0;
         }
+    } else {
+        // No damage tracking, send full frame
+        result = send_rect_packet(streamer, frame, streamer->frame_capture->x, streamer->frame_capture->y,
+                                  (int)frame->width, (int)frame->height, false);
         streamer->since_keyframe++;
     }
 
-    if (rects) XFree(rects);
     return result;
 }
 
@@ -325,76 +340,60 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
     
     streamer->streaming = true;
     
-    Display *dpy = streamer->udp_server->dm->display;
-    const long idle_sleep_us = 10000; // 10ms when no events and no keyframe due
+    const long idle_sleep_us = 16667; // ~60fps max capture rate (16.67ms)
     
     while (keep_streaming && streamer->streaming) {
         bool sent_any = false;
 
-        // Check if a keyframe is due regardless of damage
-        if (streamer->since_keyframe >= streamer->keyframe_interval) {
-            if (fc_capture_frame(streamer->frame_capture) < 0) {
-                fprintf(stderr, "Capture failed (keyframe)\n");
-                break;
-            }
+        // Always try to capture a new frame
+        int capture_result = fc_capture_frame(streamer->frame_capture);
+        if (capture_result < 0) {
+            fprintf(stderr, "Capture failed\n");
+            break;
+        }
+        
+        if (capture_result > 0) { // New frame was captured
             XImage *frame = fc_get_frame(streamer->frame_capture);
             if (frame) {
-                if (frame_streamer_send_frame(streamer, frame) == 0) {
-                    streamer->frames_sent++;
-                    streamer->frame_id++;
+                // Check if keyframe is needed
+                bool force_keyframe = (streamer->since_keyframe >= streamer->keyframe_interval);
+                
+                // Also force keyframe if enough time elapsed
+                struct timeval now_kf;
+                gettimeofday(&now_kf, NULL);
+                long since_kf_us = (now_kf.tv_sec - streamer->last_keyframe_time.tv_sec) * 1000000L +
+                                  (now_kf.tv_usec - streamer->last_keyframe_time.tv_usec);
+                if (since_kf_us >= streamer->keyframe_period_us) {
+                    force_keyframe = true;
                 }
-                fc_mark_frame_processed(streamer->frame_capture);
-                sent_any = true;
-                // since_keyframe reset is done inside send when keyframe path is used
-            }
-        } else if (streamer->frame_capture->damage_enabled) {
-            // Process pending X events to register damage
-            int pending = XPending(dpy);
-            if (pending > 0) {
-                XEvent ev;
-                // Drain event queue quickly; damage is accumulated and fetched below
-                while (pending-- > 0) {
-                    XNextEvent(dpy, &ev);
-                }
-            }
 
-            // Fetch damage rects; if none, idle
-            XRectangle *rects = NULL;
-            int nrects = 0;
-            if (fc_get_damage_rects(streamer->frame_capture, &rects, &nrects) == 0 && nrects > 0) {
-                // Capture once to get a fresh frame for rect extraction
-                if (fc_capture_frame(streamer->frame_capture) < 0) {
-                    fprintf(stderr, "Capture failed (damage)\n");
-                    if (rects) XFree(rects);
-                    break;
-                }
-                XImage *frame = fc_get_frame(streamer->frame_capture);
-                if (frame) {
-                    // Send deltas using the filtered rects; skip tiny ones and cap count
-                    int sent_rects = 0;
-                    for (int i = 0; i < nrects; i++) {
-                        int area = rects[i].width * rects[i].height;
-                        if (area < MIN_CHANGE_PIXELS) continue;
-                        if (sent_rects >= MAX_RECTS_PER_FRAME) break;
-                        if (send_rect_packet(streamer, frame,
-                                             rects[i].x, rects[i].y,
-                                             rects[i].width, rects[i].height, false) != 0) {
-                            fprintf(stderr, "Failed to send delta rect\n");
-                            break;
-                        }
-                        sent_rects++;
+                if (force_keyframe) {
+                    // Send keyframe
+                    if (frame_streamer_send_frame(streamer, frame) == 0) {
+                        streamer->frames_sent++;
+                        streamer->frame_id++;
+                        sent_any = true;
                     }
-                    streamer->frames_sent++;
-                    streamer->frame_id++;
-                    sent_any = true;
-                    fc_mark_frame_processed(streamer->frame_capture);
+                } else if (streamer->frame_capture->damage_enabled) {
+                    // Check for damage
+                    DamageRect *rects = NULL;
+                    int nrects = 0;
+                    if (fc_get_damage_rects(streamer->frame_capture, &rects, &nrects) == 0 && nrects > 0) {
+                        // Send damaged regions
+                        if (frame_streamer_send_frame(streamer, frame) == 0) {
+                            streamer->frames_sent++;
+                            streamer->frame_id++;
+                            sent_any = true;
+                        }
+                    }
                 }
-                if (rects) XFree(rects);
+                
+                fc_mark_frame_processed(streamer->frame_capture);
             }
         }
 
         if (!sent_any) {
-            // Idle briefly to avoid busy spin; events will wake in next loop
+            // Idle briefly to avoid busy spin
             usleep(idle_sleep_us);
         }
 
@@ -413,6 +412,14 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
                    fps_window,
                    streamer->tiles_sent, streamer->packets_sent, streamer->bytes_sent,
                    avg_enc_us, avg_send_us, mbps);
+            
+            // Debug: Print damage tracking info
+            if (streamer->frame_capture->damage_tracker) {
+                bool has_damage = dt_has_damage(streamer->frame_capture->damage_tracker);
+                printf("[DEBUG] Has damage: %s, Since keyframe: %d\n", 
+                       has_damage ? "YES" : "NO", streamer->since_keyframe);
+            }
+            
             streamer->frames_in_window = streamer->frames_sent;
             streamer->packets_sent = 0;
             streamer->tiles_sent = 0;

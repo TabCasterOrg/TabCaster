@@ -25,6 +25,47 @@ typedef struct {
     size_t offset;
 } PNGMemoryData;
 
+// Simple absolute difference-based region detect (stub)
+static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
+                                        const unsigned char *curr_bgrx,
+                                        int width,
+                                        int height,
+                                        int bytes_per_line,
+                                        int threshold,
+                                        int *out_x,
+                                        int *out_y,
+                                        int *out_w,
+                                        int *out_h) {
+    if (!prev_rgb || !curr_bgrx || width <= 0 || height <= 0) return 0;
+    int min_x = width, min_y = height, max_x = -1, max_y = -1;
+    for (int y = 0; y < height; y++) {
+        const unsigned char *curr_line = curr_bgrx + y * bytes_per_line;
+        const unsigned char *prev_line = prev_rgb + y * (width * 3);
+        for (int x = 0; x < width; x++) {
+            unsigned char b = curr_line[x * 4 + 0];
+            unsigned char g = curr_line[x * 4 + 1];
+            unsigned char r = curr_line[x * 4 + 2];
+            int idx = x * 3;
+            int dr = (int)r - (int)prev_line[idx + 0];
+            int dg = (int)g - (int)prev_line[idx + 1];
+            int db = (int)b - (int)prev_line[idx + 2];
+            int ad = (dr < 0 ? -dr : dr) + (dg < 0 ? -dg : dg) + (db < 0 ? -db : db);
+            if (ad > threshold) {
+                if (x < min_x) min_x = x;
+                if (y < min_y) min_y = y;
+                if (x > max_x) max_x = x;
+                if (y > max_y) max_y = y;
+            }
+        }
+    }
+    if (max_x < 0) return 0; // no change
+    *out_x = min_x;
+    *out_y = min_y;
+    *out_w = (max_x - min_x + 1);
+    *out_h = (max_y - min_y + 1);
+    return 1;
+}
+
 // PNG write callback for memory
 static void png_write_data_callback(png_structp png_ptr, png_bytep data, png_size_t length) {
     PNGMemoryData *mem_data = (PNGMemoryData*)png_get_io_ptr(png_ptr);
@@ -54,6 +95,63 @@ static void png_write_data_callback(png_structp png_ptr, png_bytep data, png_siz
 static void png_flush_callback(png_structp png_ptr) {
     // No-op for memory writing
     (void)png_ptr;
+}
+
+// Encode raw RGB24 buffer to PNG (fast settings)
+static int encode_rgb_to_png(const unsigned char *rgb,
+                             int width,
+                             int height,
+                             unsigned char **png_data,
+                             size_t *png_size) {
+    if (!rgb || width <= 0 || height <= 0 || !png_data || !png_size) return -1;
+
+    png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png_ptr) return -1;
+
+    png_infop info_ptr = png_create_info_struct(png_ptr);
+    if (!info_ptr) {
+        png_destroy_write_struct(&png_ptr, NULL);
+        return -1;
+    }
+
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        return -1;
+    }
+
+    PNGMemoryData mem_data = (PNGMemoryData){0};
+    mem_data.allocated = (size_t)width * (size_t)height * 2;
+    mem_data.data = malloc(mem_data.allocated);
+    if (!mem_data.data) {
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        return -1;
+    }
+
+    png_set_write_fn(png_ptr, &mem_data, png_write_data_callback, png_flush_callback);
+    png_set_IHDR(png_ptr, info_ptr, width, height, 8,
+                 PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
+                 PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+    png_set_compression_level(png_ptr, 1);
+    png_set_filter(png_ptr, 0, PNG_FILTER_NONE);
+    png_write_info(png_ptr, info_ptr);
+
+    png_bytep *row_pointers = malloc(sizeof(png_bytep) * (size_t)height);
+    if (!row_pointers) {
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        free(mem_data.data);
+        return -1;
+    }
+    for (int y = 0; y < height; y++) {
+        row_pointers[y] = (png_bytep)(rgb + (size_t)y * (size_t)width * 3);
+    }
+    png_write_image(png_ptr, row_pointers);
+    png_write_end(png_ptr, NULL);
+    free(row_pointers);
+    png_destroy_write_struct(&png_ptr, &info_ptr);
+
+    *png_data = mem_data.data;
+    *png_size = mem_data.size;
+    return 0;
 }
 
 // Fallback conversion for uncommon XImage formats
@@ -271,7 +369,32 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
         return NULL;
     }
     
-    printf("Optimized frame streamer initialized for '%s' with direct PNG encoding\n", output_name);
+    // Initialize delta scaffolding fields
+    streamer->reference_frame_rgb = NULL;
+    streamer->reference_size = 0;
+    streamer->reference_width = 0;
+    streamer->reference_height = 0;
+    // Toggle via environment variable TABC_DELTA=1
+    const char *delta_env = getenv("TABC_DELTA");
+    streamer->delta_mode_enabled = (delta_env && strcmp(delta_env, "1") == 0);
+
+    // Tunables with sensible defaults
+    streamer->diff_threshold = 30;
+    streamer->cover_threshold_pct = 80;
+    streamer->keyframe_interval = 120;
+    const char *th_env = getenv("TABC_THRESH");
+    const char *cov_env = getenv("TABC_COVER");
+    const char *key_env = getenv("TABC_KEYINT");
+    if (th_env) streamer->diff_threshold = atoi(th_env);
+    if (cov_env) streamer->cover_threshold_pct = atoi(cov_env);
+    if (key_env) streamer->keyframe_interval = atoi(key_env);
+
+    printf("Optimized frame streamer initialized for '%s' | delta %s | thresh=%d cover=%d%% keyint=%d\n",
+           output_name,
+           streamer->delta_mode_enabled ? "ENABLED" : "DISABLED",
+           streamer->diff_threshold,
+           streamer->cover_threshold_pct,
+           streamer->keyframe_interval);
     return streamer;
 }
 
@@ -319,16 +442,23 @@ int frame_streamer_send_frame_info(FrameStreamer *streamer) {
     ClientInfo *client = udp_server_get_client(streamer->udp_server);
     UDPServer *server = streamer->udp_server;
     
-    // Include format information
-    char info_packet[64];
-    snprintf(info_packet, sizeof(info_packet), "INFO:%d:%d:PNG", 
-             client->width, client->height);
+    // Include format and delta capability information
+    // Format: INFO:<w>:<h>:PNG[:DELTA]
+    char info_packet[96];
+    if (streamer->delta_mode_enabled) {
+        snprintf(info_packet, sizeof(info_packet), "INFO:%d:%d:PNG:DELTA", 
+                 client->width, client->height);
+    } else {
+        snprintf(info_packet, sizeof(info_packet), "INFO:%d:%d:PNG", 
+                 client->width, client->height);
+    }
     
     if (udp_server_send_response(server, info_packet) != 0) {
         return -1;
     }
     
-    printf("Sent frame info: %dx%d PNG format\n", client->width, client->height);
+    printf("Sent frame info: %dx%d PNG%s\n", client->width, client->height,
+           streamer->delta_mode_enabled ? "+DELTA" : "");
     
     // Small delay to ensure client receives frame info before data packets
     usleep(10000); // 10ms delay
@@ -343,7 +473,165 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     UDPServer *server = streamer->udp_server;
     ClientInfo *client = udp_server_get_client(server);
     
-    // Direct XImage to PNG conversion
+    // Allocate/update reference frame on first frame (RGB24) for delta mode
+    if (streamer->reference_frame_rgb == NULL ||
+        streamer->reference_width != (unsigned int)frame->width ||
+        streamer->reference_height != (unsigned int)frame->height) {
+        free(streamer->reference_frame_rgb);
+        streamer->reference_width = frame->width;
+        streamer->reference_height = frame->height;
+        streamer->reference_size = (size_t)frame->width * (size_t)frame->height * 3;
+        streamer->reference_frame_rgb = (unsigned char*)malloc(streamer->reference_size);
+        if (!streamer->reference_frame_rgb) {
+            fprintf(stderr, "Failed to allocate reference frame buffer\n");
+            return -1;
+        }
+        // Initialize reference by converting current frame BGRX->RGB once
+        unsigned char *src = (unsigned char*)frame->data;
+        for (int y = 0; y < frame->height; y++) {
+            unsigned char *line_src = src + (y * frame->bytes_per_line);
+            unsigned char *line_dst = streamer->reference_frame_rgb + (size_t)y * (size_t)frame->width * 3;
+            for (int x = 0; x < frame->width; x++) {
+                unsigned char b = line_src[x * 4 + 0];
+                unsigned char g = line_src[x * 4 + 1];
+                unsigned char r = line_src[x * 4 + 2];
+                line_dst[x * 3 + 0] = r;
+                line_dst[x * 3 + 1] = g;
+                line_dst[x * 3 + 2] = b;
+            }
+        }
+    }
+
+    // If delta mode enabled and format matches, attempt region send (but always send full keyframe for frame_id==0)
+    if (streamer->delta_mode_enabled && streamer->frame_id > 0 &&
+        frame->bits_per_pixel == 32 && frame->byte_order == LSBFirst) {
+        int rx = 0, ry = 0, rw = 0, rh = 0;
+        int changed = compute_changed_bounds_rgb24(streamer->reference_frame_rgb,
+                                                   (const unsigned char*)frame->data,
+                                                   frame->width,
+                                                   frame->height,
+                                                   frame->bytes_per_line,
+                                                   streamer->diff_threshold,
+                                                   &rx,&ry,&rw,&rh);
+        if (changed) {
+            size_t region_pixels = (size_t)rw * (size_t)rh;
+            size_t total_pixels = (size_t)frame->width * (size_t)frame->height;
+            double coverage = (double)region_pixels / (double)total_pixels;
+            if ((int)(coverage * 100.0 + 0.5) <= streamer->cover_threshold_pct) {
+                // Extract region RGB and encode as PNG
+                size_t region_rgb_size = region_pixels * 3;
+                unsigned char *region_rgb = (unsigned char*)malloc(region_rgb_size);
+                if (!region_rgb) return -1;
+                for (int y = 0; y < rh; y++) {
+                    const unsigned char *line_src = (unsigned char*)frame->data + (size_t)(ry + y) * (size_t)frame->bytes_per_line;
+                    unsigned char *line_dst = region_rgb + (size_t)y * (size_t)rw * 3;
+                    for (int x = 0; x < rw; x++) {
+                        unsigned char b = line_src[(rx + x) * 4 + 0];
+                        unsigned char g = line_src[(rx + x) * 4 + 1];
+                        unsigned char r = line_src[(rx + x) * 4 + 2];
+                        line_dst[x * 3 + 0] = r;
+                        line_dst[x * 3 + 1] = g;
+                        line_dst[x * 3 + 2] = b;
+                    }
+                }
+                unsigned char *region_png = NULL;
+                size_t region_png_size = 0;
+                if (encode_rgb_to_png(region_rgb, rw, rh, &region_png, &region_png_size) != 0) {
+                    free(region_rgb);
+                    return -1;
+                }
+                const char magic[4] = {'D','R','E','G'};
+                size_t header_size = 4 + 2+2+2+2 + 1 + 1 + 2;
+                size_t payload_size = header_size + region_png_size;
+                unsigned char *payload = (unsigned char*)malloc(payload_size);
+                if (!payload) {
+                    free(region_rgb);
+                    free(region_png);
+                    return -1;
+                }
+                size_t off = 0;
+                memcpy(payload + off, magic, 4); off += 4;
+                uint16_t nx = htons((uint16_t)rx);
+                uint16_t ny = htons((uint16_t)ry);
+                uint16_t nw = htons((uint16_t)rw);
+                uint16_t nh = htons((uint16_t)rh);
+                memcpy(payload + off, &nx, 2); off += 2;
+                memcpy(payload + off, &ny, 2); off += 2;
+                memcpy(payload + off, &nw, 2); off += 2;
+                memcpy(payload + off, &nh, 2); off += 2;
+                payload[off++] = 0; // flags
+                payload[off++] = 90; // quality hint
+                uint16_t nres = htons(0);
+                memcpy(payload + off, &nres, 2); off += 2;
+                memcpy(payload + off, region_png, region_png_size); off += region_png_size;
+
+                size_t data_per_packet = MAX_PACKET_SIZE - sizeof(PacketHeader);
+                size_t total_packets = (payload_size + data_per_packet - 1) / data_per_packet;
+                for (size_t packet_id = 0; packet_id < total_packets; packet_id++) {
+                    size_t remaining = payload_size - (packet_id * data_per_packet);
+                    size_t current_data_size = (remaining > data_per_packet) ? data_per_packet : remaining;
+                    char packet[MAX_PACKET_SIZE];
+                    PacketHeader *header = (PacketHeader*)packet;
+                    header->frame_id = htonl(streamer->frame_id);
+                    header->packet_id = htonl(packet_id);
+                    header->total_packets = htonl(total_packets);
+                    header->data_size = htonl(current_data_size);
+                    memcpy(packet + sizeof(PacketHeader), payload + (packet_id * data_per_packet), current_data_size);
+                    ssize_t packet_size = sizeof(PacketHeader) + current_data_size;
+                    ssize_t bytes_sent = sendto(server->socket_fd, packet, packet_size, 0,
+                                                (struct sockaddr*)&client->address,
+                                                client->address_len);
+                    if (bytes_sent < 0) {
+                        perror("Failed to send delta packet");
+                        free(region_rgb);
+                        free(region_png);
+                        free(payload);
+                        return -1;
+                    }
+                }
+
+                // Update reference buffer region
+                for (int y = 0; y < rh; y++) {
+                    unsigned char *dst = streamer->reference_frame_rgb + ((size_t)(ry + y) * (size_t)frame->width + (size_t)rx) * 3;
+                    unsigned char *src = region_rgb + (size_t)y * (size_t)rw * 3;
+                    memcpy(dst, src, (size_t)rw * 3);
+                }
+
+                free(region_rgb);
+                free(region_png);
+                free(payload);
+
+                return 0; // sent delta region
+            } else {
+                // Coverage too high; send keyframe only at configured interval
+                if (streamer->keyframe_interval > 0 && (streamer->frame_id % streamer->keyframe_interval) != 0) {
+                    // Update reference with current full frame but SKIP sending to save bandwidth
+                    if (streamer->reference_frame_rgb) {
+                        unsigned char *src2 = (unsigned char*)frame->data;
+                        for (int y2 = 0; y2 < frame->height; y2++) {
+                            unsigned char *line_src2 = src2 + (y2 * frame->bytes_per_line);
+                            unsigned char *line_dst2 = streamer->reference_frame_rgb + (size_t)y2 * (size_t)frame->width * 3;
+                            for (int x2 = 0; x2 < frame->width; x2++) {
+                                unsigned char b2 = line_src2[x2 * 4 + 0];
+                                unsigned char g2 = line_src2[x2 * 4 + 1];
+                                unsigned char r2 = line_src2[x2 * 4 + 2];
+                                line_dst2[x2 * 3 + 0] = r2;
+                                line_dst2[x2 * 3 + 1] = g2;
+                                line_dst2[x2 * 3 + 2] = b2;
+                            }
+                        }
+                    }
+                    return 1; // skip sending this frame
+                }
+            }
+        }
+        // If not changed at all, skip sending
+        if (!changed) {
+            return 1; // skipped (no change)
+        }
+    }
+
+    // Direct XImage to PNG conversion (full-frame fallback)
     unsigned char *png_data = NULL;
     size_t png_size = 0;
     
@@ -400,6 +688,23 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     }
     
     free(png_data);
+
+    // Update reference buffer with full-frame content (BGRX -> RGB)
+    if (streamer->reference_frame_rgb) {
+        unsigned char *src2 = (unsigned char*)frame->data;
+        for (int y2 = 0; y2 < frame->height; y2++) {
+            unsigned char *line_src2 = src2 + (y2 * frame->bytes_per_line);
+            unsigned char *line_dst2 = streamer->reference_frame_rgb + (size_t)y2 * (size_t)frame->width * 3;
+            for (int x2 = 0; x2 < frame->width; x2++) {
+                unsigned char b2 = line_src2[x2 * 4 + 0];
+                unsigned char g2 = line_src2[x2 * 4 + 1];
+                unsigned char r2 = line_src2[x2 * 4 + 2];
+                line_dst2[x2 * 3 + 0] = r2;
+                line_dst2[x2 * 3 + 1] = g2;
+                line_dst2[x2 * 3 + 2] = b2;
+            }
+        }
+    }
     
     // Less frequent progress updates
     if (streamer->frame_id % 60 == 0) {
@@ -434,15 +739,16 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
         if (result == 1) {  // New frame captured
             XImage *frame = fc_get_frame(streamer->frame_capture);
             if (frame) {
-                if (frame_streamer_send_frame(streamer, frame) == 0) {
+                int send_result = frame_streamer_send_frame(streamer, frame);
+                if (send_result == 0) {
                     streamer->frames_sent++;
                     streamer->frame_id++;
                     
                     if (streamer->frames_sent % 60 == 0) {
                         printf("Sent %d PNG frames\n", streamer->frames_sent);
                     }
-                } else {
-                    fprintf(stderr, "Failed to send PNG frame %d\n", streamer->frame_id);
+                } else if (send_result < 0) {
+                    fprintf(stderr, "Failed to send frame %d\n", streamer->frame_id);
                 }
                 
                 fc_mark_frame_processed(streamer->frame_capture);
@@ -563,6 +869,9 @@ void frame_streamer_cleanup(FrameStreamer *streamer) {
     if (streamer->frame_capture) {
         fc_cleanup(streamer->frame_capture);
     }
+    // Free delta scaffolding buffers
+    free(streamer->reference_frame_rgb);
+    streamer->reference_frame_rgb = NULL;
     
     free(streamer);
 }

@@ -11,6 +11,17 @@
 #define MAX_PACKET_SIZE 1400
 #define FRAME_HEADER_SIZE 16
 
+// Delta streaming protocol (scaffolding)
+typedef struct __attribute__((packed)) {
+    uint16_t x;
+    uint16_t y;
+    uint16_t width;
+    uint16_t height;
+    uint8_t flags;      // bit0: is_keyframe, bit1: allow_lossy, others reserved
+    uint8_t quality;    // 0-100 for adaptive quality
+    uint16_t reserved;  // alignment
+} RegionHeader;
+
 // Frame packet header structure
 typedef struct __attribute__((packed)) {
     uint32_t frame_id;
@@ -34,6 +45,18 @@ typedef struct {
     // Frame conversion buffer
     unsigned char *rgb_buffer;
     size_t buffer_size;
+
+    // Persistent reference frame for delta encoding (RGB)
+    unsigned char *reference_frame_rgb;
+    size_t reference_size;
+    unsigned int reference_width;
+    unsigned int reference_height;
+    bool delta_mode_enabled;    // off by default; scaffolding only
+
+    // Delta tuning parameters
+    int diff_threshold;         // pixel difference sum threshold per pixel (default 30)
+    int cover_threshold_pct;    // max changed coverage percentage for delta (default 80)
+    int keyframe_interval;      // send full keyframe every N frames when coverage high (default 120)
 } FrameStreamer;
 
 // Core functions

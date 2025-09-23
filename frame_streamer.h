@@ -64,12 +64,17 @@ typedef struct {
     // Inactivity detection for preventing reference frame desync
     struct timeval last_activity_time;
     int inactivity_threshold_sec;
+    
+    // Reference frame validation
+    uint32_t reference_frame_checksum;
+    uint32_t last_sent_frame_id;
 } FrameStreamer;
 
 // Core functions
 FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_name, int fps);
 int frame_streamer_start(FrameStreamer *streamer);
 int frame_streamer_wait_for_start_command(FrameStreamer *streamer);
+int frame_streamer_handle_keyframe_request(FrameStreamer *streamer);
 int frame_streamer_send_frame_info(FrameStreamer *streamer);
 int frame_streamer_run_loop(FrameStreamer *streamer);
 int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame);

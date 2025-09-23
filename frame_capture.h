@@ -31,6 +31,11 @@ typedef struct {
     bool capture_cursor;
     int xfixes_event_base;
     int xfixes_error_base;
+    
+    // Cursor tracking for clean background restoration
+    XImage *clean_frame;  // Frame without cursor
+    int last_cursor_x, last_cursor_y;
+    bool cursor_was_drawn;
 } FrameCapture;
 
 // Core functions

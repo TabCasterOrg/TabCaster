@@ -194,6 +194,10 @@ FrameCapture* fc_init(DisplayManager *dm, const char *output_name, int fps) {
     // Check for XFixes extension for cursor capture       
     if (XFixesQueryExtension(dm->display, &fc->xfixes_event_base, &fc->xfixes_error_base)) {
         fc->capture_cursor = true;
+        fc->cursor_was_drawn = false;
+        fc->last_cursor_x = -1;
+        fc->last_cursor_y = -1;
+        fc->clean_frame = NULL;
         printf("XFixes extension available - cursor capture enabled\n");
     } else {
         fc->capture_cursor = false;
@@ -286,11 +290,61 @@ void fc_composite_cursor(FrameCapture *fc) {
     int cursor_x = cursor_img->x - fc->x;
     int cursor_y = cursor_img->y - fc->y;
     
+    // CRITICAL FIX: First restore previous cursor area if needed
+    if (fc->cursor_was_drawn && fc->clean_frame) {
+        // Restore the clean pixels where cursor was previously drawn
+        int restore_x = fc->last_cursor_x - cursor_img->xhot;
+        int restore_y = fc->last_cursor_y - cursor_img->yhot;
+        
+        // Restore the area that was previously covered by cursor
+        for (unsigned int cy = 0; cy < cursor_img->height; cy++) {
+            for (unsigned int cx = 0; cx < cursor_img->width; cx++) {
+                int frame_x = restore_x + cx;
+                int frame_y = restore_y + cy;
+                
+                // Bounds check
+                if (frame_x >= 0 && frame_x < (int)fc->width && 
+                    frame_y >= 0 && frame_y < (int)fc->height) {
+                    
+                    unsigned long clean_pixel = XGetPixel(fc->clean_frame, frame_x, frame_y);
+                    XPutPixel(fc->current_frame, frame_x, frame_y, clean_pixel);
+                }
+            }
+        }
+    }
+    
     // Check if cursor is within capture bounds
     if (cursor_x >= -cursor_img->xhot && cursor_x < (int)fc->width &&
         cursor_y >= -cursor_img->yhot && cursor_y < (int)fc->height) {
         
-        // Composite cursor onto the frame
+        // Create or update clean frame before drawing cursor
+        if (!fc->clean_frame) {
+            // Create a copy of the current frame without cursor
+            fc->clean_frame = XCreateImage(fc->dm->display, 
+                                          DefaultVisual(fc->dm->display, DefaultScreen(fc->dm->display)),
+                                          DefaultDepth(fc->dm->display, DefaultScreen(fc->dm->display)),
+                                          ZPixmap, 0, NULL,
+                                          fc->width, fc->height, 32, 0);
+            if (fc->clean_frame) {
+                fc->clean_frame->data = malloc(fc->clean_frame->bytes_per_line * fc->clean_frame->height);
+                if (!fc->clean_frame->data) {
+                    XDestroyImage(fc->clean_frame);
+                    fc->clean_frame = NULL;
+                }
+            }
+        }
+        
+        // Copy current frame to clean frame before drawing cursor
+        if (fc->clean_frame) {
+            for (int y = 0; y < (int)fc->height; y++) {
+                for (int x = 0; x < (int)fc->width; x++) {
+                    unsigned long pixel = XGetPixel(fc->current_frame, x, y);
+                    XPutPixel(fc->clean_frame, x, y, pixel);
+                }
+            }
+        }
+        
+        // Now composite cursor onto the frame
         for (unsigned int cy = 0; cy < cursor_img->height; cy++) {
             for (unsigned int cx = 0; cx < cursor_img->width; cx++) {
                 int frame_x = cursor_x - cursor_img->xhot + cx;
@@ -309,6 +363,14 @@ void fc_composite_cursor(FrameCapture *fc) {
                 }
             }
         }
+        
+        // Update cursor tracking
+        fc->last_cursor_x = cursor_x;
+        fc->last_cursor_y = cursor_y;
+        fc->cursor_was_drawn = true;
+    } else {
+        // Cursor is outside capture area, mark as not drawn
+        fc->cursor_was_drawn = false;
     }
     
     XFree(cursor_img);
@@ -349,6 +411,15 @@ void fc_cleanup(FrameCapture *fc) {
     if (fc->current_frame) {
         XDestroyImage(fc->current_frame);
         fc->current_frame = NULL;
+    }
+    
+    // Cleanup clean frame
+    if (fc->clean_frame) {
+        if (fc->clean_frame->data) {
+            free(fc->clean_frame->data);
+        }
+        XDestroyImage(fc->clean_frame);
+        fc->clean_frame = NULL;
     }
     
     // Cleanup shared memory

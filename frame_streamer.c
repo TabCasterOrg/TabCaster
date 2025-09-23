@@ -25,6 +25,15 @@ typedef struct {
     size_t offset;
 } PNGMemoryData;
 
+// Simple checksum for reference frame validation
+static uint32_t compute_checksum(const unsigned char *data, size_t size) {
+    uint32_t checksum = 0;
+    for (size_t i = 0; i < size; i++) {
+        checksum = checksum * 31 + data[i];
+    }
+    return checksum;
+}
+
 // Simple absolute difference-based region detect (stub)
 static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                                         const unsigned char *curr_bgrx,
@@ -394,6 +403,10 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     // Initialize inactivity detection
     gettimeofday(&streamer->last_activity_time, NULL);
     streamer->inactivity_threshold_sec = 5; // Force keyframe after 5 seconds of inactivity
+    
+    // Initialize reference frame validation
+    streamer->reference_frame_checksum = 0;
+    streamer->last_sent_frame_id = 0;
 
     printf("Optimized frame streamer initialized for '%s' | delta %s | thresh=%d cover=%d%% keyint=%d\n",
            output_name,
@@ -439,6 +452,41 @@ int frame_streamer_wait_for_start_command(FrameStreamer *streamer) {
         printf("Unexpected command: %s\n", buffer);
         return -1;
     }
+}
+
+// Handle keyframe request from client
+int frame_streamer_handle_keyframe_request(FrameStreamer *streamer) {
+    if (!streamer) return -1;
+    
+    char buffer[UDP_BUFFER_SIZE];
+    UDPServer *server = streamer->udp_server;
+    ClientInfo *client = udp_server_get_client(server);
+    
+    // Non-blocking check for keyframe request
+    fd_set readfds;
+    struct timeval timeout = {0, 0}; // No wait
+    
+    FD_ZERO(&readfds);
+    FD_SET(server->socket_fd, &readfds);
+    
+    int result = select(server->socket_fd + 1, &readfds, NULL, NULL, &timeout);
+    if (result > 0 && FD_ISSET(server->socket_fd, &readfds)) {
+        ssize_t bytes_received = recvfrom(server->socket_fd, buffer, sizeof(buffer) - 1, 0,
+                                         (struct sockaddr*)&client->address,
+                                         &client->address_len);
+        
+        if (bytes_received > 0) {
+            buffer[bytes_received] = '\0';
+            if (strcmp(buffer, "REQUEST_KEYFRAME") == 0) {
+                printf("Client requested keyframe - forcing next frame to be full frame\n");
+                // Force next frame to be a keyframe by resetting capture counter
+                streamer->captures_since_keyframe = streamer->keyframe_interval;
+                return 1; // Indicate keyframe was requested
+            }
+        }
+    }
+    
+    return 0; // No keyframe request
 }
 
 // Send frame info to client - indicates PNG format
@@ -624,27 +672,18 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                 // Update activity time
                 gettimeofday(&streamer->last_activity_time, NULL);
                 
+                // Update reference frame checksum after successful delta send
+                streamer->reference_frame_checksum = compute_checksum(streamer->reference_frame_rgb, streamer->reference_size);
+                streamer->last_sent_frame_id = streamer->frame_id;
+                
                 return 0; // sent delta region
             } else {
                 // Coverage too high; send keyframe only at configured interval (based on captures since last keyframe)
                 if (streamer->keyframe_interval > 0 && streamer->captures_since_keyframe % streamer->keyframe_interval != 0) {
-                    // Update reference with current full frame but SKIP sending to save bandwidth
-                    if (streamer->reference_frame_rgb) {
-                        unsigned char *src2 = (unsigned char*)frame->data;
-                        for (int y2 = 0; y2 < frame->height; y2++) {
-                            unsigned char *line_src2 = src2 + (y2 * frame->bytes_per_line);
-                            unsigned char *line_dst2 = streamer->reference_frame_rgb + (size_t)y2 * (size_t)frame->width * 3;
-                            for (int x2 = 0; x2 < frame->width; x2++) {
-                                unsigned char b2 = line_src2[x2 * 4 + 0];
-                                unsigned char g2 = line_src2[x2 * 4 + 1];
-                                unsigned char r2 = line_src2[x2 * 4 + 2];
-                                line_dst2[x2 * 3 + 0] = r2;
-                                line_dst2[x2 * 3 + 1] = g2;
-                                line_dst2[x2 * 3 + 2] = b2;
-                            }
-                        }
-                    }
-                    return 1; // skip sending this frame
+                    // CRITICAL FIX: DO NOT update reference frame when skipping frames
+                    // This prevents server-client desynchronization
+                    // The reference frame must stay in sync with what the client has
+                    return 1; // skip sending this frame without updating reference
                 }
             }
         }
@@ -740,6 +779,10 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     // Update activity time for full frames
     gettimeofday(&streamer->last_activity_time, NULL);
     
+    // Update reference frame checksum after successful full frame send
+    streamer->reference_frame_checksum = compute_checksum(streamer->reference_frame_rgb, streamer->reference_size);
+    streamer->last_sent_frame_id = streamer->frame_id;
+    
     return 0;
 }
 
@@ -762,6 +805,9 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
     streamer->streaming = true;
     
     while (keep_streaming && streamer->streaming) {
+        // Check for keyframe requests from client
+        frame_streamer_handle_keyframe_request(streamer);
+        
         int result = fc_capture_frame(streamer->frame_capture);
         
         if (result == 1) {  // New frame captured

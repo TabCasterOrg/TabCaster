@@ -60,6 +60,10 @@ typedef struct {
 
     // Keyframe cadence based on captures (independent of sends)
     int captures_since_keyframe;
+    
+    // Inactivity detection for preventing reference frame desync
+    struct timeval last_activity_time;
+    int inactivity_threshold_sec;
 } FrameStreamer;
 
 // Core functions

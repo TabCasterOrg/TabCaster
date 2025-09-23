@@ -390,6 +390,10 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     if (key_env) streamer->keyframe_interval = atoi(key_env);
 
     streamer->captures_since_keyframe = 0;
+    
+    // Initialize inactivity detection
+    gettimeofday(&streamer->last_activity_time, NULL);
+    streamer->inactivity_threshold_sec = 5; // Force keyframe after 5 seconds of inactivity
 
     printf("Optimized frame streamer initialized for '%s' | delta %s | thresh=%d cover=%d%% keyint=%d\n",
            output_name,
@@ -519,7 +523,18 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
             size_t region_pixels = (size_t)rw * (size_t)rh;
             size_t total_pixels = (size_t)frame->width * (size_t)frame->height;
             double coverage = (double)region_pixels / (double)total_pixels;
-            if ((int)(coverage * 100.0 + 0.5) <= streamer->cover_threshold_pct) {
+            
+            // Force keyframe if too many frames since last keyframe (prevent desync)
+            bool force_keyframe = (streamer->captures_since_keyframe >= streamer->keyframe_interval);
+            
+            // Check for inactivity - force keyframe if too long since last activity
+            struct timeval now;
+            gettimeofday(&now, NULL);
+            long time_since_activity = (now.tv_sec - streamer->last_activity_time.tv_sec) * 1000000 +
+                                      (now.tv_usec - streamer->last_activity_time.tv_usec);
+            bool inactivity_keyframe = (time_since_activity > streamer->inactivity_threshold_sec * 1000000);
+            
+            if ((int)(coverage * 100.0 + 0.5) <= streamer->cover_threshold_pct && !force_keyframe && !inactivity_keyframe) {
                 // Extract region RGB and encode as PNG
                 size_t region_rgb_size = region_pixels * 3;
                 unsigned char *region_rgb = (unsigned char*)malloc(region_rgb_size);
@@ -603,6 +618,12 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                 free(region_png);
                 free(payload);
 
+                // Increment captures counter for delta region
+                streamer->captures_since_keyframe++;
+                
+                // Update activity time
+                gettimeofday(&streamer->last_activity_time, NULL);
+                
                 return 0; // sent delta region
             } else {
                 // Coverage too high; send keyframe only at configured interval (based on captures since last keyframe)
@@ -715,6 +736,9 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     }
     // Reset keyframe cadence counter after a full frame
     streamer->captures_since_keyframe = 0;
+    
+    // Update activity time for full frames
+    gettimeofday(&streamer->last_activity_time, NULL);
     
     return 0;
 }

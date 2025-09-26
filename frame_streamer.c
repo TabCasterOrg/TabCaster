@@ -34,7 +34,7 @@ static uint32_t compute_checksum(const unsigned char *data, size_t size) {
     return checksum;
 }
 
-// Simple absolute difference-based region detect (stub)
+// Enhanced absolute difference-based region detection with pixel counting and debug output
 static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                                         const unsigned char *curr_bgrx,
                                         int width,
@@ -45,33 +45,117 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                                         int *out_y,
                                         int *out_w,
                                         int *out_h) {
-    if (!prev_rgb || !curr_bgrx || width <= 0 || height <= 0) return 0;
+    // Enhanced validation for edge cases
+    if (!prev_rgb || !curr_bgrx || !out_x || !out_y || !out_w || !out_h) {
+        return 0;
+    }
+    if (width <= 0 || height <= 0 || threshold < 0) {
+        return 0;
+    }
+    if (bytes_per_line < width * 4) {
+        return 0; // Invalid bytes_per_line for BGRX format
+    }
+    
+    // Initialize bounds tracking
     int min_x = width, min_y = height, max_x = -1, max_y = -1;
+    int changed_pixels = 0;
+    int total_pixels = width * height;
+    
+    // Debug output for first few frames
+    static int debug_frame_count = 0;
+    static int total_debug_frames = 3;
+    bool debug_output = (debug_frame_count < total_debug_frames);
+    
+    if (debug_output) {
+        printf("=== Change Detection Debug Frame %d ===\n", debug_frame_count);
+        printf("  Dimensions: %dx%d, threshold=%d, bytes_per_line=%d\n", 
+               width, height, threshold, bytes_per_line);
+    }
+    
+    // Enhanced pixel-by-pixel comparison with better difference calculation
     for (int y = 0; y < height; y++) {
         const unsigned char *curr_line = curr_bgrx + y * bytes_per_line;
         const unsigned char *prev_line = prev_rgb + y * (width * 3);
+        
         for (int x = 0; x < width; x++) {
+            // Extract BGRX components from current frame
             unsigned char b = curr_line[x * 4 + 0];
             unsigned char g = curr_line[x * 4 + 1];
             unsigned char r = curr_line[x * 4 + 2];
-            int idx = x * 3;
-            int dr = (int)r - (int)prev_line[idx + 0];
-            int dg = (int)g - (int)prev_line[idx + 1];
-            int db = (int)b - (int)prev_line[idx + 2];
-            int ad = (dr < 0 ? -dr : dr) + (dg < 0 ? -dg : dg) + (db < 0 ? -db : db);
-            if (ad > threshold) {
+            // Skip X (padding byte at curr_line[x * 4 + 3])
+            
+            // Extract RGB components from previous frame
+            int prev_idx = x * 3;
+            unsigned char prev_r = prev_line[prev_idx + 0];
+            unsigned char prev_g = prev_line[prev_idx + 1];
+            unsigned char prev_b = prev_line[prev_idx + 2];
+            
+            // Enhanced absolute difference calculation
+            // Use proper signed arithmetic to avoid underflow issues
+            int dr = (int)r - (int)prev_r;
+            int dg = (int)g - (int)prev_g;
+            int db = (int)b - (int)prev_b;
+            
+            // Calculate absolute differences (avoiding abs() for performance)
+            int abs_dr = (dr < 0) ? -dr : dr;
+            int abs_dg = (dg < 0) ? -dg : dg;
+            int abs_db = (db < 0) ? -db : db;
+            
+            // Sum of absolute differences (SAD)
+            int total_diff = abs_dr + abs_dg + abs_db;
+            
+            // Check if pixel has changed significantly
+            if (total_diff > threshold) {
+                changed_pixels++;
+                
+                // Update bounding box
                 if (x < min_x) min_x = x;
                 if (y < min_y) min_y = y;
                 if (x > max_x) max_x = x;
                 if (y > max_y) max_y = y;
+                
+                // Debug output for first few changed pixels in debug frames
+                if (debug_output && changed_pixels <= 5) {
+                    printf("  Changed pixel[%d,%d]: RGB(%d,%d,%d) -> RGB(%d,%d,%d), diff=%d\n",
+                           x, y, prev_r, prev_g, prev_b, r, g, b, total_diff);
+                }
             }
         }
     }
-    if (max_x < 0) return 0; // no change
+    
+    // Calculate coverage percentage
+    double coverage_pct = (double)changed_pixels / (double)total_pixels * 100.0;
+    
+    // Debug output for frame summary
+    if (debug_output) {
+        printf("  Changed pixels: %d/%d (%.2f%%)\n", changed_pixels, total_pixels, coverage_pct);
+        if (changed_pixels > 0) {
+            printf("  Bounding box: (%d,%d) to (%d,%d) = %dx%d\n",
+                   min_x, min_y, max_x, max_y, max_x - min_x + 1, max_y - min_y + 1);
+        }
+        printf("=== End Debug Frame %d ===\n\n", debug_frame_count);
+        debug_frame_count++;
+    }
+    
+    // No changes detected
+    if (max_x < 0) {
+        return 0;
+    }
+    
+    // Validate and set output bounds
     *out_x = min_x;
     *out_y = min_y;
     *out_w = (max_x - min_x + 1);
     *out_h = (max_y - min_y + 1);
+    
+    // Additional validation for edge cases
+    if (*out_w <= 0 || *out_h <= 0) {
+        return 0;
+    }
+    if (*out_x < 0 || *out_y < 0 || *out_x + *out_w > width || *out_y + *out_h > height) {
+        return 0;
+    }
+    
     return 1;
 }
 

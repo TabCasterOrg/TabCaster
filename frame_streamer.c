@@ -54,7 +54,7 @@ static void update_reference_frame_from_bgrx(FrameStreamer *streamer, XImage *fr
     }
 }
 
-// Enhanced absolute difference-based region detection with pixel counting and debug output
+//  absolute difference-based region detection with pixel counting and debug output
 static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                                         const unsigned char *curr_bgrx,
                                         int width,
@@ -66,7 +66,7 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                                         int *out_w,
                                         int *out_h,
                                         int *out_changed_pixels) {
-    // Enhanced validation for edge cases
+    //  validation for edge cases
     if (!prev_rgb || !curr_bgrx || !out_x || !out_y || !out_w || !out_h || !out_changed_pixels) {
         return 0;
     }
@@ -93,7 +93,7 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                width, height, threshold, bytes_per_line);
     }
     
-    // Enhanced pixel-by-pixel comparison with better difference calculation
+    //  pixel-by-pixel comparison with better difference calculation
     for (int y = 0; y < height; y++) {
         const unsigned char *curr_line = curr_bgrx + y * bytes_per_line;
         const unsigned char *prev_line = prev_rgb + y * (width * 3);
@@ -111,7 +111,7 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
             unsigned char prev_g = prev_line[prev_idx + 1];
             unsigned char prev_b = prev_line[prev_idx + 2];
             
-            // Enhanced absolute difference calculation
+            //  absolute difference calculation
             // Use proper signed arithmetic to avoid underflow issues
             int dr = (int)r - (int)prev_r;
             int dg = (int)g - (int)prev_g;
@@ -628,7 +628,7 @@ int frame_streamer_send_frame_info(FrameStreamer *streamer) {
     return 0;
 }
 
-// Enhanced frame sending logic with improved ghosting prevention
+//  frame sending logic with improved ghosting prevention
 // Optimized frame sending with direct PNG encoding and better reference frame management
 int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     if (!streamer || !frame) return -1;
@@ -636,7 +636,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     UDPServer *server = streamer->udp_server;
     ClientInfo *client = udp_server_get_client(server);
     
-    // Enhanced debug output for troubleshooting
+    //  debug output for troubleshooting
     static int debug_frame_count = 0;
     static int total_debug_frames = 5;
     bool debug_output = (debug_frame_count < total_debug_frames);
@@ -813,11 +813,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                 }
 
                 // Update reference buffer region with the sent delta region
-                for (int y = 0; y < rh; y++) {
-                    unsigned char *dst = streamer->reference_frame_rgb + ((size_t)(ry + y) * (size_t)frame->width + (size_t)rx) * 3;
-                    unsigned char *src = region_rgb + (size_t)y * (size_t)rw * 3;
-                    memcpy(dst, src, (size_t)rw * 3);
-                }
+                update_reference_frame_from_bgrx(streamer, frame);
 
                 free(region_rgb);
                 free(region_png);

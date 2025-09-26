@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <errno.h>
 #include <png.h>
 #include <setjmp.h>
 
@@ -34,6 +35,25 @@ static uint32_t compute_checksum(const unsigned char *data, size_t size) {
     return checksum;
 }
 
+// Helper function to update reference frame from BGRX to RGB
+static void update_reference_frame_from_bgrx(FrameStreamer *streamer, XImage *frame) {
+    if (!streamer || !frame || !streamer->reference_frame_rgb) return;
+    
+    unsigned char *src = (unsigned char*)frame->data;
+    for (int y = 0; y < frame->height; y++) {
+        unsigned char *line_src = src + (y * frame->bytes_per_line);
+        unsigned char *line_dst = streamer->reference_frame_rgb + (size_t)y * (size_t)frame->width * 3;
+        for (int x = 0; x < frame->width; x++) {
+            unsigned char b = line_src[x * 4 + 0];
+            unsigned char g = line_src[x * 4 + 1];
+            unsigned char r = line_src[x * 4 + 2];
+            line_dst[x * 3 + 0] = r;
+            line_dst[x * 3 + 1] = g;
+            line_dst[x * 3 + 2] = b;
+        }
+    }
+}
+
 // Enhanced absolute difference-based region detection with pixel counting and debug output
 static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                                         const unsigned char *curr_bgrx,
@@ -44,9 +64,10 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                                         int *out_x,
                                         int *out_y,
                                         int *out_w,
-                                        int *out_h) {
+                                        int *out_h,
+                                        int *out_changed_pixels) {
     // Enhanced validation for edge cases
-    if (!prev_rgb || !curr_bgrx || !out_x || !out_y || !out_w || !out_h) {
+    if (!prev_rgb || !curr_bgrx || !out_x || !out_y || !out_w || !out_h || !out_changed_pixels) {
         return 0;
     }
     if (width <= 0 || height <= 0 || threshold < 0) {
@@ -136,6 +157,9 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
         printf("=== End Debug Frame %d ===\n\n", debug_frame_count);
         debug_frame_count++;
     }
+    
+    // Set changed pixels count
+    *out_changed_pixels = changed_pixels;
     
     // No changes detected
     if (max_x < 0) {
@@ -604,13 +628,27 @@ int frame_streamer_send_frame_info(FrameStreamer *streamer) {
     return 0;
 }
 
-// Frame sending logic
-// Optimized frame sending with direct PNG encoding
+// Enhanced frame sending logic with improved ghosting prevention
+// Optimized frame sending with direct PNG encoding and better reference frame management
 int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     if (!streamer || !frame) return -1;
     
     UDPServer *server = streamer->udp_server;
     ClientInfo *client = udp_server_get_client(server);
+    
+    // Enhanced debug output for troubleshooting
+    static int debug_frame_count = 0;
+    static int total_debug_frames = 5;
+    bool debug_output = (debug_frame_count < total_debug_frames);
+    
+    if (debug_output) {
+        printf("\n=== Frame Send Debug %d ===\n", debug_frame_count);
+        printf("  Frame ID: %d, Delta mode: %s\n", streamer->frame_id, 
+               streamer->delta_mode_enabled ? "ENABLED" : "DISABLED");
+        printf("  Frame size: %dx%d, BPP: %d, Byte order: %s\n", 
+               frame->width, frame->height, frame->bits_per_pixel,
+               frame->byte_order == LSBFirst ? "LSBFirst" : "MSBFirst");
+    }
     
     // Allocate/update reference frame on first frame (RGB24) for delta mode
     if (streamer->reference_frame_rgb == NULL ||
@@ -625,37 +663,41 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
             fprintf(stderr, "Failed to allocate reference frame buffer\n");
             return -1;
         }
-        // Initialize reference by converting current frame BGRX->RGB once
-        unsigned char *src = (unsigned char*)frame->data;
-        for (int y = 0; y < frame->height; y++) {
-            unsigned char *line_src = src + (y * frame->bytes_per_line);
-            unsigned char *line_dst = streamer->reference_frame_rgb + (size_t)y * (size_t)frame->width * 3;
-            for (int x = 0; x < frame->width; x++) {
-                unsigned char b = line_src[x * 4 + 0];
-                unsigned char g = line_src[x * 4 + 1];
-                unsigned char r = line_src[x * 4 + 2];
-                line_dst[x * 3 + 0] = r;
-                line_dst[x * 3 + 1] = g;
-                line_dst[x * 3 + 2] = b;
-            }
+        
+        if (debug_output) {
+            printf("  Allocated new reference frame buffer: %zu bytes\n", streamer->reference_size);
         }
+        
+        // Initialize reference by converting current frame BGRX->RGB once
+        update_reference_frame_from_bgrx(streamer, frame);
     }
 
     // If delta mode enabled and format matches, attempt region send (but always send full keyframe for frame_id==0)
     if (streamer->delta_mode_enabled && streamer->frame_id > 0 &&
         frame->bits_per_pixel == 32 && frame->byte_order == LSBFirst) {
-        int rx = 0, ry = 0, rw = 0, rh = 0;
+        
+        int rx = 0, ry = 0, rw = 0, rh = 0, changed_pixels = 0;
         int changed = compute_changed_bounds_rgb24(streamer->reference_frame_rgb,
                                                    (const unsigned char*)frame->data,
                                                    frame->width,
                                                    frame->height,
                                                    frame->bytes_per_line,
                                                    streamer->diff_threshold,
-                                                   &rx,&ry,&rw,&rh);
+                                                   &rx, &ry, &rw, &rh, &changed_pixels);
+        
+        if (debug_output) {
+            printf("  Change detection result: %s\n", changed ? "CHANGES_FOUND" : "NO_CHANGES");
+            if (changed) {
+                printf("  Changed pixels: %d, Bounding box: (%d,%d) %dx%d\n", 
+                       changed_pixels, rx, ry, rw, rh);
+            }
+        }
+        
         if (changed) {
-            size_t region_pixels = (size_t)rw * (size_t)rh;
+            // Better coverage calculation using actual changed pixels instead of bounding box area
             size_t total_pixels = (size_t)frame->width * (size_t)frame->height;
-            double coverage = (double)region_pixels / (double)total_pixels;
+            double actual_coverage = (double)changed_pixels / (double)total_pixels;
+            double bbox_coverage = (double)(rw * rh) / (double)total_pixels;
             
             // Force keyframe if too many frames since last keyframe (prevent desync)
             bool force_keyframe = (streamer->captures_since_keyframe >= streamer->keyframe_interval);
@@ -667,11 +709,29 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                                       (now.tv_usec - streamer->last_activity_time.tv_usec);
             bool inactivity_keyframe = (time_since_activity > streamer->inactivity_threshold_sec * 1000000);
             
-            if ((int)(coverage * 100.0 + 0.5) <= streamer->cover_threshold_pct && !force_keyframe && !inactivity_keyframe) {
+            if (debug_output) {
+                printf("  Coverage: actual=%.2f%%, bbox=%.2f%%, threshold=%d%%\n", 
+                       actual_coverage * 100.0, bbox_coverage * 100.0, streamer->cover_threshold_pct);
+                printf("  Force keyframe: %s, Inactivity keyframe: %s\n", 
+                       force_keyframe ? "YES" : "NO", inactivity_keyframe ? "YES" : "NO");
+            }
+            
+            // Use actual changed pixels for coverage decision (more accurate than bounding box)
+            if ((int)(actual_coverage * 100.0 + 0.5) <= streamer->cover_threshold_pct && 
+                !force_keyframe && !inactivity_keyframe) {
+                
+                if (debug_output) {
+                    printf("  Sending delta region: (%d,%d) %dx%d\n", rx, ry, rw, rh);
+                }
+                
                 // Extract region RGB and encode as PNG
+                size_t region_pixels = (size_t)rw * (size_t)rh;
                 size_t region_rgb_size = region_pixels * 3;
                 unsigned char *region_rgb = (unsigned char*)malloc(region_rgb_size);
-                if (!region_rgb) return -1;
+                if (!region_rgb) {
+                    fprintf(stderr, "Failed to allocate region RGB buffer\n");
+                    return -1;
+                }
                 for (int y = 0; y < rh; y++) {
                     const unsigned char *line_src = (unsigned char*)frame->data + (size_t)(ry + y) * (size_t)frame->bytes_per_line;
                     unsigned char *line_dst = region_rgb + (size_t)y * (size_t)rw * 3;
@@ -687,14 +747,20 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                 unsigned char *region_png = NULL;
                 size_t region_png_size = 0;
                 if (encode_rgb_to_png(region_rgb, rw, rh, &region_png, &region_png_size) != 0) {
+                    fprintf(stderr, "Failed to encode delta region to PNG\n");
                     free(region_rgb);
                     return -1;
+                }
+                
+                if (debug_output) {
+                    printf("  Delta region encoded: %zu bytes PNG\n", region_png_size);
                 }
                 const char magic[4] = {'D','R','E','G'};
                 size_t header_size = 4 + 2+2+2+2 + 1 + 1 + 2;
                 size_t payload_size = header_size + region_png_size;
                 unsigned char *payload = (unsigned char*)malloc(payload_size);
                 if (!payload) {
+                    fprintf(stderr, "Failed to allocate delta payload buffer\n");
                     free(region_rgb);
                     free(region_png);
                     return -1;
@@ -717,6 +783,11 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
 
                 size_t data_per_packet = MAX_PACKET_SIZE - sizeof(PacketHeader);
                 size_t total_packets = (payload_size + data_per_packet - 1) / data_per_packet;
+                
+                if (debug_output) {
+                    printf("  Sending delta in %zu packets\n", total_packets);
+                }
+                
                 for (size_t packet_id = 0; packet_id < total_packets; packet_id++) {
                     size_t remaining = payload_size - (packet_id * data_per_packet);
                     size_t current_data_size = (remaining > data_per_packet) ? data_per_packet : remaining;
@@ -732,7 +803,8 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                                                 (struct sockaddr*)&client->address,
                                                 client->address_len);
                     if (bytes_sent < 0) {
-                        perror("Failed to send delta packet");
+                        fprintf(stderr, "Failed to send delta packet %zu/%zu: %s\n", 
+                                packet_id + 1, total_packets, strerror(errno));
                         free(region_rgb);
                         free(region_png);
                         free(payload);
@@ -740,7 +812,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                     }
                 }
 
-                // Update reference buffer region
+                // Update reference buffer region with the sent delta region
                 for (int y = 0; y < rh; y++) {
                     unsigned char *dst = streamer->reference_frame_rgb + ((size_t)(ry + y) * (size_t)frame->width + (size_t)rx) * 3;
                     unsigned char *src = region_rgb + (size_t)y * (size_t)rw * 3;
@@ -761,53 +833,51 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                 streamer->reference_frame_checksum = compute_checksum(streamer->reference_frame_rgb, streamer->reference_size);
                 streamer->last_sent_frame_id = streamer->frame_id;
                 
+                if (debug_output) {
+                    printf("  Delta region sent successfully\n");
+                }
+                
                 return 0; // sent delta region
             } else {
-                // FIXED: Coverage too high - always update reference frame even when skipping send
-                // Update reference buffer with current frame (BGRX -> RGB)
-                unsigned char *src = (unsigned char*)frame->data;
-                for (int y = 0; y < frame->height; y++) {
-                    unsigned char *line_src = src + (y * frame->bytes_per_line);
-                    unsigned char *line_dst = streamer->reference_frame_rgb + (size_t)y * (size_t)frame->width * 3;
-                    for (int x = 0; x < frame->width; x++) {
-                        unsigned char b = line_src[x * 4 + 0];
-                        unsigned char g = line_src[x * 4 + 1];
-                        unsigned char r = line_src[x * 4 + 2];
-                        line_dst[x * 3 + 0] = r;
-                        line_dst[x * 3 + 1] = g;
-                        line_dst[x * 3 + 2] = b;
-                    }
+                // Coverage too high or keyframe forced - always update reference frame to prevent ghosting
+                if (debug_output) {
+                    printf("  Coverage too high or keyframe forced - updating reference frame\n");
                 }
+                
+                // CRITICAL: Always update reference frame to prevent ghosting artifacts
+                update_reference_frame_from_bgrx(streamer, frame);
                 
                 // Send keyframe only at configured interval (based on captures since last keyframe)
                 if (streamer->keyframe_interval > 0 && streamer->captures_since_keyframe % streamer->keyframe_interval != 0) {
                     // Skip sending but reference is now updated - this prevents ghosting
                     streamer->captures_since_keyframe++;
+                    
+                    if (debug_output) {
+                        printf("  Skipping send but reference frame updated (prevents ghosting)\n");
+                    }
+                    
                     return 1; // skip sending this frame but reference frame is synchronized
                 }
                 // If we reach here, send full keyframe (code below handles this)
             }
         } else {
-            // FIXED: No change detected - still update reference frame to stay synchronized
-            // Update reference buffer with current frame (BGRX -> RGB)
-            unsigned char *src = (unsigned char*)frame->data;
-            for (int y = 0; y < frame->height; y++) {
-                unsigned char *line_src = src + (y * frame->bytes_per_line);
-                unsigned char *line_dst = streamer->reference_frame_rgb + (size_t)y * (size_t)frame->width * 3;
-                for (int x = 0; x < frame->width; x++) {
-                    unsigned char b = line_src[x * 4 + 0];
-                    unsigned char g = line_src[x * 4 + 1];
-                    unsigned char r = line_src[x * 4 + 2];
-                    line_dst[x * 3 + 0] = r;
-                    line_dst[x * 3 + 1] = g;
-                    line_dst[x * 3 + 2] = b;
-                }
+            // No change detected - still update reference frame to stay synchronized
+            if (debug_output) {
+                printf("  No changes detected - updating reference frame for synchronization\n");
             }
+            
+            // CRITICAL: Always update reference frame to prevent ghosting artifacts
+            update_reference_frame_from_bgrx(streamer, frame);
+            
             return 1; // skipped (no change) but reference frame updated
         }
     }
 
     // Direct XImage to PNG conversion (full-frame fallback)
+    if (debug_output) {
+        printf("  Sending full keyframe (fallback or forced)\n");
+    }
+    
     unsigned char *png_data = NULL;
     size_t png_size = 0;
     
@@ -821,7 +891,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     size_t total_packets = (png_size + data_per_packet - 1) / data_per_packet;
     
     // Debug info for first few frames only
-    if (streamer->frame_id < 3) {
+    if (streamer->frame_id < 3 || debug_output) {
         size_t estimated_rgb_size = frame->width * frame->height * 3;
         float compression_ratio = (float)estimated_rgb_size / png_size;
         printf("Frame %d: %dx%d -> PNG(%zu bytes) = %.1fx compression, %zu packets\n",
@@ -852,7 +922,8 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                                    client->address_len);
         
         if (bytes_sent < 0) {
-            perror("Failed to send packet");
+            fprintf(stderr, "Failed to send packet %zu/%zu: %s\n", 
+                    packet_id + 1, total_packets, strerror(errno));
             free(png_data);
             return -1;
         }
@@ -865,22 +936,8 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     
     free(png_data);
 
-    // Update reference buffer with full-frame content (BGRX -> RGB)
-    if (streamer->reference_frame_rgb) {
-        unsigned char *src2 = (unsigned char*)frame->data;
-        for (int y2 = 0; y2 < frame->height; y2++) {
-            unsigned char *line_src2 = src2 + (y2 * frame->bytes_per_line);
-            unsigned char *line_dst2 = streamer->reference_frame_rgb + (size_t)y2 * (size_t)frame->width * 3;
-            for (int x2 = 0; x2 < frame->width; x2++) {
-                unsigned char b2 = line_src2[x2 * 4 + 0];
-                unsigned char g2 = line_src2[x2 * 4 + 1];
-                unsigned char r2 = line_src2[x2 * 4 + 2];
-                line_dst2[x2 * 3 + 0] = r2;
-                line_dst2[x2 * 3 + 1] = g2;
-                line_dst2[x2 * 3 + 2] = b2;
-            }
-        }
-    }
+    // CRITICAL: Always update reference buffer with full-frame content to prevent ghosting
+    update_reference_frame_from_bgrx(streamer, frame);
     
     // Less frequent progress updates
     if (streamer->frame_id % 60 == 0) {
@@ -896,6 +953,12 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     // Update reference frame checksum after successful full frame send
     streamer->reference_frame_checksum = compute_checksum(streamer->reference_frame_rgb, streamer->reference_size);
     streamer->last_sent_frame_id = streamer->frame_id;
+    
+    if (debug_output) {
+        printf("  Full keyframe sent successfully\n");
+        printf("=== End Frame Send Debug %d ===\n\n", debug_frame_count);
+        debug_frame_count++;
+    }
     
     return 0;
 }

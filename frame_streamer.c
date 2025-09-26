@@ -520,6 +520,7 @@ int frame_streamer_send_frame_info(FrameStreamer *streamer) {
     return 0;
 }
 
+// Frame sending logic
 // Optimized frame sending with direct PNG encoding
 int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     if (!streamer || !frame) return -1;
@@ -678,18 +679,47 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                 
                 return 0; // sent delta region
             } else {
-                // Coverage too high; send keyframe only at configured interval (based on captures since last keyframe)
+                // FIXED: Coverage too high - always update reference frame even when skipping send
+                // Update reference buffer with current frame (BGRX -> RGB)
+                unsigned char *src = (unsigned char*)frame->data;
+                for (int y = 0; y < frame->height; y++) {
+                    unsigned char *line_src = src + (y * frame->bytes_per_line);
+                    unsigned char *line_dst = streamer->reference_frame_rgb + (size_t)y * (size_t)frame->width * 3;
+                    for (int x = 0; x < frame->width; x++) {
+                        unsigned char b = line_src[x * 4 + 0];
+                        unsigned char g = line_src[x * 4 + 1];
+                        unsigned char r = line_src[x * 4 + 2];
+                        line_dst[x * 3 + 0] = r;
+                        line_dst[x * 3 + 1] = g;
+                        line_dst[x * 3 + 2] = b;
+                    }
+                }
+                
+                // Send keyframe only at configured interval (based on captures since last keyframe)
                 if (streamer->keyframe_interval > 0 && streamer->captures_since_keyframe % streamer->keyframe_interval != 0) {
-                    // CRITICAL FIX: DO NOT update reference frame when skipping frames
-                    // This prevents server-client desynchronization
-                    // The reference frame must stay in sync with what the client has
-                    return 1; // skip sending this frame without updating reference
+                    // Skip sending but reference is now updated - this prevents ghosting
+                    streamer->captures_since_keyframe++;
+                    return 1; // skip sending this frame but reference frame is synchronized
+                }
+                // If we reach here, send full keyframe (code below handles this)
+            }
+        } else {
+            // FIXED: No change detected - still update reference frame to stay synchronized
+            // Update reference buffer with current frame (BGRX -> RGB)
+            unsigned char *src = (unsigned char*)frame->data;
+            for (int y = 0; y < frame->height; y++) {
+                unsigned char *line_src = src + (y * frame->bytes_per_line);
+                unsigned char *line_dst = streamer->reference_frame_rgb + (size_t)y * (size_t)frame->width * 3;
+                for (int x = 0; x < frame->width; x++) {
+                    unsigned char b = line_src[x * 4 + 0];
+                    unsigned char g = line_src[x * 4 + 1];
+                    unsigned char r = line_src[x * 4 + 2];
+                    line_dst[x * 3 + 0] = r;
+                    line_dst[x * 3 + 1] = g;
+                    line_dst[x * 3 + 2] = b;
                 }
             }
-        }
-        // If not changed at all, skip sending
-        if (!changed) {
-            return 1; // skipped (no change)
+            return 1; // skipped (no change) but reference frame updated
         }
     }
 

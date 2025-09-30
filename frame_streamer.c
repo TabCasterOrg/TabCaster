@@ -629,6 +629,7 @@ int frame_streamer_send_frame_info(FrameStreamer *streamer) {
 }
 
 //  frame sending logic with improved ghosting prevention
+//  frame sending logic with improved ghosting prevention
 int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     if (!streamer || !frame) return -1;
     
@@ -656,49 +657,28 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
             return -1;
         }
         
-        // Initialize reference frame for first frame
-        update_reference_frame_from_bgrx(streamer, frame);
-        
         if (debug_output) {
-            printf("  Allocated and initialized reference frame buffer: %zu bytes\n", streamer->reference_size);
+            printf("  Allocated reference frame buffer: %zu bytes\n", streamer->reference_size);
         }
         
         // Send first frame as keyframe (no delta comparison possible)
         goto send_full_frame;
     }
 
-    // CRITICAL FIX: Store the CURRENT reference frame before updating it
-    // This ensures we compare against the frame that was actually sent to client
-    unsigned char *comparison_reference = NULL;
-    if (streamer->delta_mode_enabled && streamer->frame_id > 0) {
-        // Make a copy of current reference frame for comparison
-        comparison_reference = (unsigned char*)malloc(streamer->reference_size);
-        if (comparison_reference) {
-            memcpy(comparison_reference, streamer->reference_frame_rgb, streamer->reference_size);
-        }
-    }
-
-    // CRITICAL FIX: Update reference frame IMMEDIATELY after capture
-    // This ensures reference frame always matches what's currently on screen
-    update_reference_frame_from_bgrx(streamer, frame);
-
-    // Delta mode logic with proper reference frame
+    // Delta mode logic  Compare against current reference, don't update yet
     if (streamer->delta_mode_enabled && streamer->frame_id > 0 &&
-        comparison_reference != NULL &&
         frame->bits_per_pixel == 32 && frame->byte_order == LSBFirst) {
         
         int rx = 0, ry = 0, rw = 0, rh = 0, changed_pixels = 0;
         
-        // Compare current frame against the PREVIOUSLY SENT frame (comparison_reference)
-        int changed = compute_changed_bounds_rgb24(comparison_reference,  // Previous sent frame
+        // Compare current frame against the reference frame (what client currently has)
+        int changed = compute_changed_bounds_rgb24(streamer->reference_frame_rgb,  // What client has
                                                    (const unsigned char*)frame->data,  // Current frame
                                                    frame->width,
                                                    frame->height,
                                                    frame->bytes_per_line,
                                                    streamer->diff_threshold,
                                                    &rx, &ry, &rw, &rh, &changed_pixels);
-        
-        free(comparison_reference); // Clean up temporary reference
         
         if (debug_output) {
             printf("  Frame %d: Change detection result: %s\n", streamer->frame_id, 
@@ -826,6 +806,15 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                     }
                 }
                 
+                // Only update reference frame AFTER successful send
+                // Update only the region we sent to match what client now has
+                for (int y = 0; y < rh; y++) {
+                    unsigned char *ref_line = streamer->reference_frame_rgb + 
+                                             ((size_t)(ry + y) * (size_t)frame->width + (size_t)rx) * 3;
+                    unsigned char *region_line = region_rgb + (size_t)y * (size_t)rw * 3;
+                    memcpy(ref_line, region_line, (size_t)rw * 3);
+                }
+                
                 free(region_rgb);
                 free(region_png);
                 free(payload);
@@ -843,7 +832,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                 return 0; // Successfully sent delta
             }
         } else {
-            // No changes detected - skip sending but reference frame is already updated
+            // No changes detected - skip sending, don't update reference
             if (debug_output) {
                 printf("  No changes detected - skipping send\n");
             }
@@ -911,6 +900,9 @@ send_full_frame:
     }
     
     free(png_data);
+    
+    // Update reference frame with full frame AFTER successful send
+    update_reference_frame_from_bgrx(streamer, frame);
     
     // Reset keyframe counter and update timestamps
     streamer->captures_since_keyframe = 0;

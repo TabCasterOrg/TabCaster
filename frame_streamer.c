@@ -35,14 +35,14 @@ static uint32_t compute_checksum(const unsigned char *data, size_t size) {
     return checksum;
 }
 
-// Helper function to update reference frame from BGRX to RGB
-static void update_reference_frame_from_bgrx(FrameStreamer *streamer, XImage *frame) {
-    if (!streamer || !frame || !streamer->reference_frame_rgb) return;
+// Helper function to convert full frame from BGRX to RGB
+static void convert_frame_bgrx_to_rgb(const XImage *frame, unsigned char *rgb_out) {
+    if (!frame || !rgb_out) return;
     
     unsigned char *src = (unsigned char*)frame->data;
     for (int y = 0; y < frame->height; y++) {
         unsigned char *line_src = src + (y * frame->bytes_per_line);
-        unsigned char *line_dst = streamer->reference_frame_rgb + (size_t)y * (size_t)frame->width * 3;
+        unsigned char *line_dst = rgb_out + (size_t)y * (size_t)frame->width * 3;
         for (int x = 0; x < frame->width; x++) {
             unsigned char b = line_src[x * 4 + 0];
             unsigned char g = line_src[x * 4 + 1];
@@ -54,7 +54,7 @@ static void update_reference_frame_from_bgrx(FrameStreamer *streamer, XImage *fr
     }
 }
 
-//  absolute difference-based region detection with pixel counting and debug output
+// Absolute difference-based region detection with pixel counting and debug output
 static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                                         const unsigned char *curr_bgrx,
                                         int width,
@@ -66,7 +66,7 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                                         int *out_w,
                                         int *out_h,
                                         int *out_changed_pixels) {
-    //  validation for edge cases
+    // Validation for edge cases
     if (!prev_rgb || !curr_bgrx || !out_x || !out_y || !out_w || !out_h || !out_changed_pixels) {
         return 0;
     }
@@ -93,7 +93,7 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
                width, height, threshold, bytes_per_line);
     }
     
-    //  pixel-by-pixel comparison with better difference calculation
+    // Pixel-by-pixel comparison with better difference calculation
     for (int y = 0; y < height; y++) {
         const unsigned char *curr_line = curr_bgrx + y * bytes_per_line;
         const unsigned char *prev_line = prev_rgb + y * (width * 3);
@@ -103,7 +103,6 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
             unsigned char b = curr_line[x * 4 + 0];
             unsigned char g = curr_line[x * 4 + 1];
             unsigned char r = curr_line[x * 4 + 2];
-            // Skip X (padding byte at curr_line[x * 4 + 3])
             
             // Extract RGB components from previous frame
             int prev_idx = x * 3;
@@ -111,13 +110,12 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
             unsigned char prev_g = prev_line[prev_idx + 1];
             unsigned char prev_b = prev_line[prev_idx + 2];
             
-            //  absolute difference calculation
-            // Use proper signed arithmetic to avoid underflow issues
+            // Absolute difference calculation
             int dr = (int)r - (int)prev_r;
             int dg = (int)g - (int)prev_g;
             int db = (int)b - (int)prev_b;
             
-            // Calculate absolute differences (avoiding abs() for performance)
+            // Calculate absolute differences
             int abs_dr = (dr < 0) ? -dr : dr;
             int abs_dg = (dg < 0) ? -dg : dg;
             int abs_db = (db < 0) ? -db : db;
@@ -295,66 +293,10 @@ static int encode_ximage_fallback_png(XImage *img, unsigned char **png_data,
     }
     
     // Encode RGB to PNG
-    png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png_ptr) {
-        free(rgb_buffer);
-        return -1;
-    }
-    
-    png_infop info_ptr = png_create_info_struct(png_ptr);
-    if (!info_ptr) {
-        png_destroy_write_struct(&png_ptr, NULL);
-        free(rgb_buffer);
-        return -1;
-    }
-    
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        png_destroy_write_struct(&png_ptr, &info_ptr);
-        free(rgb_buffer);
-        return -1;
-    }
-    
-    // Set up memory writing
-    PNGMemoryData mem_data = {0};
-    mem_data.allocated = img->width * img->height * 4; // Initial allocation
-    mem_data.data = malloc(mem_data.allocated);
-    if (!mem_data.data) {
-        png_destroy_write_struct(&png_ptr, &info_ptr);
-        free(rgb_buffer);
-        return -1;
-    }
-    
-    png_set_write_fn(png_ptr, &mem_data, png_write_data_callback, png_flush_callback);
-    
-    // Set PNG parameters for speed
-    png_set_IHDR(png_ptr, info_ptr, img->width, img->height, 8,
-                 PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
-                 PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
-    
-    // Optimize for speed
-    png_set_compression_level(png_ptr, 1); // Fastest compression
-    png_set_filter(png_ptr, 0, PNG_FILTER_NONE); // No filtering for speed
-    
-    png_write_info(png_ptr, info_ptr);
-    
-    // Write image data row by row
-    png_bytep *row_pointers = malloc(sizeof(png_bytep) * img->height);
-    for (int y = 0; y < img->height; y++) {
-        row_pointers[y] = rgb_buffer + (y * img->width * 3);
-    }
-    
-    png_write_image(png_ptr, row_pointers);
-    png_write_end(png_ptr, NULL);
-    
-    // Cleanup
-    free(row_pointers);
-    png_destroy_write_struct(&png_ptr, &info_ptr);
+    int result = encode_rgb_to_png(rgb_buffer, img->width, img->height, png_data, png_size);
     free(rgb_buffer);
     
-    *png_data = mem_data.data;
-    *png_size = mem_data.size;
-    
-    return 0;
+    return result;
 }
 
 // Direct XImage to PNG conversion
@@ -375,98 +317,47 @@ static int encode_ximage_to_png(XImage *img, unsigned char **png_data,
         first_call = 0;
     }
     
-    png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png_ptr) return -1;
-    
-    png_infop info_ptr = png_create_info_struct(png_ptr);
-    if (!info_ptr) {
-        png_destroy_write_struct(&png_ptr, NULL);
-        return -1;
-    }
-    
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        png_destroy_write_struct(&png_ptr, &info_ptr);
-        return -1;
-    }
-    
-    // Set up memory writing
-    PNGMemoryData mem_data = {0};
-    mem_data.allocated = width * height * 4; // Initial allocation
-    mem_data.data = malloc(mem_data.allocated);
-    if (!mem_data.data) {
-        png_destroy_write_struct(&png_ptr, &info_ptr);
-        return -1;
-    }
-    
-    png_set_write_fn(png_ptr, &mem_data, png_write_data_callback, png_flush_callback);
-    
     // For specific format (24-bit depth, 32 BPP, LSBFirst)
     if (img->depth == 24 && img->bits_per_pixel == 32 && img->byte_order == LSBFirst) {
         // This is BGRX format (Blue, Green, Red, X padding)
         if (img->red_mask == 0xff0000 && img->green_mask == 0xff00 && img->blue_mask == 0xff) {
             // Standard BGRX format - convert to RGB for PNG
             
-            // Set PNG parameters for RGB
-            png_set_IHDR(png_ptr, info_ptr, width, height, 8,
-                         PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
-                         PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+            // Allocate RGB buffer
+            size_t rgb_size = width * height * 3;
+            unsigned char *rgb_buffer = malloc(rgb_size);
+            if (!rgb_buffer) return -1;
             
-            // Optimize for speed
-            png_set_compression_level(png_ptr, 1); // Fastest compression
-            png_set_filter(png_ptr, 0, PNG_FILTER_NONE); // No filtering for speed
-            
-            png_write_info(png_ptr, info_ptr);
-            
-            // Convert and write data row by row
-            unsigned char *row_buffer = malloc(width * 3);
-            if (!row_buffer) {
-                png_destroy_write_struct(&png_ptr, &info_ptr);
-                free(mem_data.data);
-                return -1;
-            }
-            
+            // Convert BGRX to RGB
             unsigned char *src = (unsigned char*)img->data;
-            
             for (int y = 0; y < height; y++) {
                 unsigned char *line_src = src + (y * img->bytes_per_line);
+                unsigned char *line_dst = rgb_buffer + (y * width * 3);
                 
                 for (int x = 0; x < width; x++) {
-                    // BGRX → RGB conversion
                     unsigned char b = line_src[x * 4 + 0];
                     unsigned char g = line_src[x * 4 + 1];
                     unsigned char r = line_src[x * 4 + 2];
-                    // Skip X (padding byte at line_src[x * 4 + 3])
                     
-                    row_buffer[x * 3 + 0] = r; // R
-                    row_buffer[x * 3 + 1] = g; // G
-                    row_buffer[x * 3 + 2] = b; // B
+                    line_dst[x * 3 + 0] = r;
+                    line_dst[x * 3 + 1] = g;
+                    line_dst[x * 3 + 2] = b;
                 }
-                
-                png_write_row(png_ptr, row_buffer);
             }
             
-            free(row_buffer);
+            // Encode to PNG
+            int result = encode_rgb_to_png(rgb_buffer, width, height, png_data, png_size);
+            free(rgb_buffer);
+            return result;
             
         } else {
             // Non-standard masks - use pixel-by-pixel conversion
-            png_destroy_write_struct(&png_ptr, &info_ptr);
-            free(mem_data.data);
             return encode_ximage_fallback_png(img, png_data, png_size);
         }
     } else {
         // Other formats - use fallback
-        png_destroy_write_struct(&png_ptr, &info_ptr);
-        free(mem_data.data);
         return encode_ximage_fallback_png(img, png_data, png_size);
     }
-    
-    png_write_end(png_ptr, NULL);
-    png_destroy_write_struct(&png_ptr, &info_ptr);
-    
-    *png_data = mem_data.data;
-    *png_size = mem_data.size;
-    
-    return 0;
 }
 
 // Initialize frame streamer 
@@ -628,8 +519,7 @@ int frame_streamer_send_frame_info(FrameStreamer *streamer) {
     return 0;
 }
 
-//  frame sending logic with improved ghosting prevention
-//  frame sending logic with improved ghosting prevention
+// Frame sending logic with proper synchronization
 int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
     if (!streamer || !frame) return -1;
     
@@ -665,7 +555,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
         goto send_full_frame;
     }
 
-    // Delta mode logic  Compare against current reference, don't update yet
+    // Delta mode logic - Compare against current reference, don't update yet
     if (streamer->delta_mode_enabled && streamer->frame_id > 0 &&
         frame->bits_per_pixel == 32 && frame->byte_order == LSBFirst) {
         
@@ -717,7 +607,8 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                     printf("  Sending delta region: (%d,%d) %dx%d\n", rx, ry, rw, rh);
                 }
                 
-                // Extract and send delta region
+                // Extract region from current frame FIRST before encoding
+                // This ensures the region_rgb buffer contains the exact data we'll send
                 size_t region_pixels = (size_t)rw * (size_t)rh;
                 size_t region_rgb_size = region_pixels * 3;
                 unsigned char *region_rgb = (unsigned char*)malloc(region_rgb_size);
@@ -726,9 +617,10 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                     return -1;
                 }
                 
-                // Extract region from current frame
+                // Extract region from current frame (BGRX -> RGB)
                 for (int y = 0; y < rh; y++) {
-                    const unsigned char *line_src = (unsigned char*)frame->data + (size_t)(ry + y) * (size_t)frame->bytes_per_line;
+                    const unsigned char *line_src = (unsigned char*)frame->data + 
+                                                    (size_t)(ry + y) * (size_t)frame->bytes_per_line;
                     unsigned char *line_dst = region_rgb + (size_t)y * (size_t)rw * 3;
                     for (int x = 0; x < rw; x++) {
                         unsigned char b = line_src[(rx + x) * 4 + 0];
@@ -740,7 +632,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                     }
                 }
                 
-                // Encode and send delta region
+                // Encode the extracted region to PNG
                 unsigned char *region_png = NULL;
                 size_t region_png_size = 0;
                 if (encode_rgb_to_png(region_rgb, rw, rh, &region_png, &region_png_size) != 0) {
@@ -782,6 +674,7 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                 size_t data_per_packet = MAX_PACKET_SIZE - sizeof(PacketHeader);
                 size_t total_packets = (payload_size + data_per_packet - 1) / data_per_packet;
                 
+                bool send_failed = false;
                 for (size_t packet_id = 0; packet_id < total_packets; packet_id++) {
                     size_t remaining = payload_size - (packet_id * data_per_packet);
                     size_t current_data_size = (remaining > data_per_packet) ? data_per_packet : remaining;
@@ -799,34 +692,38 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                     if (bytes_sent < 0) {
                         fprintf(stderr, "Failed to send delta packet %zu/%zu: %s\n", 
                                 packet_id + 1, total_packets, strerror(errno));
-                        free(region_rgb);
-                        free(region_png);
-                        free(payload);
-                        return -1;
+                        send_failed = true;
+                        break;
                     }
                 }
                 
-                // Only update reference frame AFTER successful send
-                // Update only the region we sent to match what client now has
-                for (int y = 0; y < rh; y++) {
-                    unsigned char *ref_line = streamer->reference_frame_rgb + 
-                                             ((size_t)(ry + y) * (size_t)frame->width + (size_t)rx) * 3;
-                    unsigned char *region_line = region_rgb + (size_t)y * (size_t)rw * 3;
-                    memcpy(ref_line, region_line, (size_t)rw * 3);
+                // Only update reference frame if send was successful
+                if (!send_failed) {
+                    // Update reference frame with the EXACT data we just sent (from region_rgb)
+                    for (int y = 0; y < rh; y++) {
+                        unsigned char *ref_line = streamer->reference_frame_rgb + 
+                                                 ((size_t)(ry + y) * (size_t)frame->width + (size_t)rx) * 3;
+                        unsigned char *region_line = region_rgb + (size_t)y * (size_t)rw * 3;
+                        memcpy(ref_line, region_line, (size_t)rw * 3);
+                    }
+                    
+                    // Update counters and timestamps
+                    streamer->captures_since_keyframe++;
+                    gettimeofday(&streamer->last_activity_time, NULL);
+                    streamer->reference_frame_checksum = compute_checksum(streamer->reference_frame_rgb, streamer->reference_size);
+                    streamer->last_sent_frame_id = streamer->frame_id;
+                    
+                    if (debug_output) {
+                        printf("  Delta region sent successfully\n");
+                    }
                 }
                 
                 free(region_rgb);
                 free(region_png);
                 free(payload);
                 
-                // Update counters and timestamps
-                streamer->captures_since_keyframe++;
-                gettimeofday(&streamer->last_activity_time, NULL);
-                streamer->reference_frame_checksum = compute_checksum(streamer->reference_frame_rgb, streamer->reference_size);
-                streamer->last_sent_frame_id = streamer->frame_id;
-                
-                if (debug_output) {
-                    printf("  Delta region sent successfully\n");
+                if (send_failed) {
+                    return -1;
                 }
                 
                 return 0; // Successfully sent delta
@@ -846,11 +743,25 @@ send_full_frame:
         printf("  Sending full keyframe\n");
     }
     
+    // Convert frame to RGB FIRST, then encode
+    // This ensures reference frame matches exactly what we encode
+    size_t full_rgb_size = (size_t)frame->width * (size_t)frame->height * 3;
+    unsigned char *full_rgb = (unsigned char*)malloc(full_rgb_size);
+    if (!full_rgb) {
+        fprintf(stderr, "Failed to allocate RGB buffer for full frame\n");
+        return -1;
+    }
+    
+    // Convert BGRX to RGB
+    convert_frame_bgrx_to_rgb(frame, full_rgb);
+    
+    // Encode the RGB buffer to PNG
     unsigned char *png_data = NULL;
     size_t png_size = 0;
     
-    if (encode_ximage_to_png(frame, &png_data, &png_size) != 0) {
+    if (encode_rgb_to_png(full_rgb, frame->width, frame->height, &png_data, &png_size) != 0) {
         fprintf(stderr, "Failed to encode frame %d to PNG\n", streamer->frame_id);
+        free(full_rgb);
         return -1;
     }
     
@@ -866,6 +777,7 @@ send_full_frame:
                png_size, compression_ratio, total_packets);
     }
     
+    bool send_failed = false;
     for (size_t packet_id = 0; packet_id < total_packets; packet_id++) {
         size_t remaining = png_size - (packet_id * data_per_packet);
         size_t current_data_size = (remaining > data_per_packet) ? data_per_packet : remaining;
@@ -890,8 +802,8 @@ send_full_frame:
         if (bytes_sent < 0) {
             fprintf(stderr, "Failed to send packet %zu/%zu: %s\n", 
                     packet_id + 1, total_packets, strerror(errno));
-            free(png_data);
-            return -1;
+            send_failed = true;
+            break;
         }
         
         if (total_packets > 100) {
@@ -901,18 +813,27 @@ send_full_frame:
     
     free(png_data);
     
-    // Update reference frame with full frame AFTER successful send
-    update_reference_frame_from_bgrx(streamer, frame);
+    // Only update reference frame if send was successful
+    if (!send_failed) {
+        // Update reference frame with the EXACT RGB data we just encoded and sent
+        memcpy(streamer->reference_frame_rgb, full_rgb, full_rgb_size);
+        
+        // Reset keyframe counter and update timestamps
+        streamer->captures_since_keyframe = 0;
+        gettimeofday(&streamer->last_activity_time, NULL);
+        streamer->reference_frame_checksum = compute_checksum(streamer->reference_frame_rgb, streamer->reference_size);
+        streamer->last_sent_frame_id = streamer->frame_id;
+        
+        if (debug_output) {
+            printf("  Full keyframe sent successfully\n");
+            debug_frame_count++;
+        }
+    }
     
-    // Reset keyframe counter and update timestamps
-    streamer->captures_since_keyframe = 0;
-    gettimeofday(&streamer->last_activity_time, NULL);
-    streamer->reference_frame_checksum = compute_checksum(streamer->reference_frame_rgb, streamer->reference_size);
-    streamer->last_sent_frame_id = streamer->frame_id;
+    free(full_rgb);
     
-    if (debug_output) {
-        printf("  Full keyframe sent successfully\n");
-        debug_frame_count++;
+    if (send_failed) {
+        return -1;
     }
     
     return 0;

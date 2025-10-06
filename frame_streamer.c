@@ -555,157 +555,41 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
         goto send_full_frame;
     }
 
-    // Delta mode logic - Compare against current reference, don't update yet
+    // Delta mode logic - Try to create delta frame with multiple operations
     if (streamer->delta_mode_enabled && streamer->frame_id > 0 &&
         frame->bits_per_pixel == 32 && frame->byte_order == LSBFirst) {
         
-        int rx = 0, ry = 0, rw = 0, rh = 0, changed_pixels = 0;
+        // Check force keyframe conditions first
+        bool force_keyframe = (streamer->captures_since_keyframe >= streamer->keyframe_interval);
         
-        // Compare current frame against the reference frame (what client currently has)
-        int changed = compute_changed_bounds_rgb24(streamer->reference_frame_rgb,  // What client has
-                                                   (const unsigned char*)frame->data,  // Current frame
-                                                   frame->width,
-                                                   frame->height,
-                                                   frame->bytes_per_line,
-                                                   streamer->diff_threshold,
-                                                   &rx, &ry, &rw, &rh, &changed_pixels);
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        long time_since_activity = (now.tv_sec - streamer->last_activity_time.tv_sec) * 1000000 +
+                                  (now.tv_usec - streamer->last_activity_time.tv_usec);
+        bool inactivity_keyframe = (time_since_activity > streamer->inactivity_threshold_sec * 1000000);
         
         if (debug_output) {
-            printf("  Frame %d: Change detection result: %s\n", streamer->frame_id, 
-                   changed ? "CHANGES_FOUND" : "NO_CHANGES");
-            if (changed) {
-                printf("  Changed pixels: %d, Bounding box: (%d,%d) %dx%d\n", 
-                       changed_pixels, rx, ry, rw, rh);
-            }
+            printf("  Force keyframe: %s, Inactivity keyframe: %s\n", 
+                   force_keyframe ? "YES" : "NO", inactivity_keyframe ? "YES" : "NO");
         }
         
-        if (changed) {
-            size_t total_pixels = (size_t)frame->width * (size_t)frame->height;
-            double actual_coverage = (double)changed_pixels / (double)total_pixels;
+        // Try to create delta frame if not forcing keyframe
+        if (!force_keyframe && !inactivity_keyframe) {
+            DeltaFrame delta_frame;
+            int delta_result = frame_streamer_create_delta_frame(streamer, frame, &delta_frame);
             
-            // Force keyframe conditions
-            bool force_keyframe = (streamer->captures_since_keyframe >= streamer->keyframe_interval);
-            
-            struct timeval now;
-            gettimeofday(&now, NULL);
-            long time_since_activity = (now.tv_sec - streamer->last_activity_time.tv_sec) * 1000000 +
-                                      (now.tv_usec - streamer->last_activity_time.tv_usec);
-            bool inactivity_keyframe = (time_since_activity > streamer->inactivity_threshold_sec * 1000000);
-            
-            if (debug_output) {
-                printf("  Coverage: actual=%.2f%%, threshold=%d%%\n", 
-                       actual_coverage * 100.0, streamer->cover_threshold_pct);
-                printf("  Force keyframe: %s, Inactivity keyframe: %s\n", 
-                       force_keyframe ? "YES" : "NO", inactivity_keyframe ? "YES" : "NO");
-            }
-            
-            // Send delta region if coverage is acceptable
-            if ((int)(actual_coverage * 100.0 + 0.5) <= streamer->cover_threshold_pct && 
-                !force_keyframe && !inactivity_keyframe) {
-                
+            if (delta_result == 0) {
+                // Successfully created delta frame - send it
                 if (debug_output) {
-                    printf("  Sending delta region: (%d,%d) %dx%d\n", rx, ry, rw, rh);
+                    printf("  Sending delta frame with %d operations\n", delta_frame.operation_count);
                 }
                 
-                // Extract region from current frame FIRST before encoding
-                // This ensures the region_rgb buffer contains the exact data we'll send
-                size_t region_pixels = (size_t)rw * (size_t)rh;
-                size_t region_rgb_size = region_pixels * 3;
-                unsigned char *region_rgb = (unsigned char*)malloc(region_rgb_size);
-                if (!region_rgb) {
-                    fprintf(stderr, "Failed to allocate region RGB buffer\n");
-                    return -1;
-                }
+                int send_result = frame_streamer_send_delta_frame(streamer, &delta_frame);
+                frame_streamer_cleanup_delta_frame(&delta_frame);
                 
-                // Extract region from current frame (BGRX -> RGB)
-                for (int y = 0; y < rh; y++) {
-                    const unsigned char *line_src = (unsigned char*)frame->data + 
-                                                    (size_t)(ry + y) * (size_t)frame->bytes_per_line;
-                    unsigned char *line_dst = region_rgb + (size_t)y * (size_t)rw * 3;
-                    for (int x = 0; x < rw; x++) {
-                        unsigned char b = line_src[(rx + x) * 4 + 0];
-                        unsigned char g = line_src[(rx + x) * 4 + 1];
-                        unsigned char r = line_src[(rx + x) * 4 + 2];
-                        line_dst[x * 3 + 0] = r;
-                        line_dst[x * 3 + 1] = g;
-                        line_dst[x * 3 + 2] = b;
-                    }
-                }
-                
-                // Encode the extracted region to PNG
-                unsigned char *region_png = NULL;
-                size_t region_png_size = 0;
-                if (encode_rgb_to_png(region_rgb, rw, rh, &region_png, &region_png_size) != 0) {
-                    fprintf(stderr, "Failed to encode delta region to PNG\n");
-                    free(region_rgb);
-                    return -1;
-                }
-                
-                // Create delta payload with header
-                const char magic[4] = {'D','R','E','G'};
-                size_t header_size = 4 + 2+2+2+2 + 1 + 1 + 2;
-                size_t payload_size = header_size + region_png_size;
-                unsigned char *payload = (unsigned char*)malloc(payload_size);
-                if (!payload) {
-                    fprintf(stderr, "Failed to allocate delta payload buffer\n");
-                    free(region_rgb);
-                    free(region_png);
-                    return -1;
-                }
-                
-                // Build header
-                size_t off = 0;
-                memcpy(payload + off, magic, 4); off += 4;
-                uint16_t nx = htons((uint16_t)rx);
-                uint16_t ny = htons((uint16_t)ry);
-                uint16_t nw = htons((uint16_t)rw);
-                uint16_t nh = htons((uint16_t)rh);
-                memcpy(payload + off, &nx, 2); off += 2;
-                memcpy(payload + off, &ny, 2); off += 2;
-                memcpy(payload + off, &nw, 2); off += 2;
-                memcpy(payload + off, &nh, 2); off += 2;
-                payload[off++] = 0; // flags
-                payload[off++] = 90; // quality hint
-                uint16_t nres = htons(0);
-                memcpy(payload + off, &nres, 2); off += 2;
-                memcpy(payload + off, region_png, region_png_size);
-                
-                // Send delta payload in packets
-                size_t data_per_packet = MAX_PACKET_SIZE - sizeof(PacketHeader);
-                size_t total_packets = (payload_size + data_per_packet - 1) / data_per_packet;
-                
-                bool send_failed = false;
-                for (size_t packet_id = 0; packet_id < total_packets; packet_id++) {
-                    size_t remaining = payload_size - (packet_id * data_per_packet);
-                    size_t current_data_size = (remaining > data_per_packet) ? data_per_packet : remaining;
-                    char packet[MAX_PACKET_SIZE];
-                    PacketHeader *header = (PacketHeader*)packet;
-                    header->frame_id = htonl(streamer->frame_id);
-                    header->packet_id = htonl(packet_id);
-                    header->total_packets = htonl(total_packets);
-                    header->data_size = htonl(current_data_size);
-                    memcpy(packet + sizeof(PacketHeader), payload + (packet_id * data_per_packet), current_data_size);
-                    ssize_t packet_size = sizeof(PacketHeader) + current_data_size;
-                    ssize_t bytes_sent = sendto(server->socket_fd, packet, packet_size, 0,
-                                                (struct sockaddr*)&client->address,
-                                                client->address_len);
-                    if (bytes_sent < 0) {
-                        fprintf(stderr, "Failed to send delta packet %zu/%zu: %s\n", 
-                                packet_id + 1, total_packets, strerror(errno));
-                        send_failed = true;
-                        break;
-                    }
-                }
-                
-                // Only update reference frame if send was successful
-                if (!send_failed) {
-                    // Update reference frame with the EXACT data we just sent (from region_rgb)
-                    for (int y = 0; y < rh; y++) {
-                        unsigned char *ref_line = streamer->reference_frame_rgb + 
-                                                 ((size_t)(ry + y) * (size_t)frame->width + (size_t)rx) * 3;
-                        unsigned char *region_line = region_rgb + (size_t)y * (size_t)rw * 3;
-                        memcpy(ref_line, region_line, (size_t)rw * 3);
-                    }
+                if (send_result == 0) {
+                    // Update reference frame with current frame data
+                    convert_frame_bgrx_to_rgb(frame, streamer->reference_frame_rgb);
                     
                     // Update counters and timestamps
                     streamer->captures_since_keyframe++;
@@ -714,26 +598,25 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
                     streamer->last_sent_frame_id = streamer->frame_id;
                     
                     if (debug_output) {
-                        printf("  Delta region sent successfully\n");
+                        printf("  Delta frame sent successfully\n");
                     }
-                }
-                
-                free(region_rgb);
-                free(region_png);
-                free(payload);
-                
-                if (send_failed) {
+                    
+                    return 0; // Successfully sent delta
+                } else {
+                    fprintf(stderr, "Failed to send delta frame\n");
                     return -1;
                 }
-                
-                return 0; // Successfully sent delta
+            } else if (delta_result == 1) {
+                // No changes detected or coverage too high - skip sending
+                if (debug_output) {
+                    printf("  No changes detected or coverage too high - skipping send\n");
+                }
+                return 1; // Skip send (no changes)
+            } else {
+                // Error creating delta frame
+                fprintf(stderr, "Failed to create delta frame\n");
+                return -1;
             }
-        } else {
-            // No changes detected - skip sending, don't update reference
-            if (debug_output) {
-                printf("  No changes detected - skipping send\n");
-            }
-            return 1; // Skip send (no changes)
         }
     }
 
@@ -1005,4 +888,225 @@ void frame_streamer_cleanup(FrameStreamer *streamer) {
     streamer->reference_frame_rgb = NULL;
     
     free(streamer);
+}
+
+// Create a delta frame with multiple operations (CLEAR + DRAW pattern)
+int frame_streamer_create_delta_frame(FrameStreamer *streamer, XImage *frame, DeltaFrame *delta_frame) {
+    if (!streamer || !frame || !delta_frame) return -1;
+    
+    // Initialize delta frame
+    memset(delta_frame, 0, sizeof(DeltaFrame));
+    delta_frame->frame_id = streamer->frame_id;
+    delta_frame->operation_count = 0;
+    delta_frame->total_payload_size = 0;
+    
+    // Only proceed if delta mode is enabled and we have a reference frame
+    if (!streamer->delta_mode_enabled || !streamer->reference_frame_rgb ||
+        streamer->reference_width != (unsigned int)frame->width ||
+        streamer->reference_height != (unsigned int)frame->height) {
+        return -1;
+    }
+    
+    // Detect changed region
+    int rx = 0, ry = 0, rw = 0, rh = 0, changed_pixels = 0;
+    int changed = compute_changed_bounds_rgb24(streamer->reference_frame_rgb,
+                                               (const unsigned char*)frame->data,
+                                               frame->width, frame->height,
+                                               frame->bytes_per_line,
+                                               streamer->diff_threshold,
+                                               &rx, &ry, &rw, &rh, &changed_pixels);
+    
+    if (!changed) {
+        return 1; // No changes detected
+    }
+    
+    // Check coverage threshold
+    size_t total_pixels = (size_t)frame->width * (size_t)frame->height;
+    double coverage_pct = (double)changed_pixels / (double)total_pixels * 100.0;
+    
+    if (coverage_pct > streamer->cover_threshold_pct) {
+        return 1; // Coverage too high, should send keyframe instead
+    }
+    
+    // Create CLEAR operation (CREG) - restore region to base frame state
+    DeltaOperation *clear_op = &delta_frame->operations[delta_frame->operation_count];
+    clear_op->type = OP_CREG;
+    clear_op->x = rx;
+    clear_op->y = ry;
+    clear_op->width = rw;
+    clear_op->height = rh;
+    
+    // Extract the region from reference frame (what client currently has)
+    size_t region_pixels = (size_t)rw * (size_t)rh;
+    size_t region_rgb_size = region_pixels * 3;
+    unsigned char *region_rgb = (unsigned char*)malloc(region_rgb_size);
+    if (!region_rgb) {
+        fprintf(stderr, "Failed to allocate region RGB buffer for CREG\n");
+        return -1;
+    }
+    
+    // Extract region from reference frame (RGB format)
+    for (int y = 0; y < rh; y++) {
+        unsigned char *ref_line = streamer->reference_frame_rgb + 
+                                 ((size_t)(ry + y) * (size_t)frame->width + (size_t)rx) * 3;
+        unsigned char *region_line = region_rgb + (size_t)y * (size_t)rw * 3;
+        memcpy(region_line, ref_line, (size_t)rw * 3);
+    }
+    
+    // Encode reference region to PNG
+    if (encode_rgb_to_png(region_rgb, rw, rh, &clear_op->png_data, &clear_op->png_size) != 0) {
+        fprintf(stderr, "Failed to encode CREG region to PNG\n");
+        free(region_rgb);
+        return -1;
+    }
+    
+    free(region_rgb);
+    delta_frame->operation_count++;
+    delta_frame->total_payload_size += 4 + 2+2+2+2 + 1+1+2 + clear_op->png_size; // Header + PNG
+    
+    // Create DRAW operation (DREG) - apply new content
+    DeltaOperation *draw_op = &delta_frame->operations[delta_frame->operation_count];
+    draw_op->type = OP_DREG;
+    draw_op->x = rx;
+    draw_op->y = ry;
+    draw_op->width = rw;
+    draw_op->height = rh;
+    
+    // Extract the region from current frame (BGRX -> RGB)
+    unsigned char *current_region_rgb = (unsigned char*)malloc(region_rgb_size);
+    if (!current_region_rgb) {
+        fprintf(stderr, "Failed to allocate current region RGB buffer for DREG\n");
+        frame_streamer_cleanup_delta_frame(delta_frame);
+        return -1;
+    }
+    
+    for (int y = 0; y < rh; y++) {
+        const unsigned char *line_src = (unsigned char*)frame->data + 
+                                       (size_t)(ry + y) * (size_t)frame->bytes_per_line;
+        unsigned char *line_dst = current_region_rgb + (size_t)y * (size_t)rw * 3;
+        for (int x = 0; x < rw; x++) {
+            unsigned char b = line_src[(rx + x) * 4 + 0];
+            unsigned char g = line_src[(rx + x) * 4 + 1];
+            unsigned char r = line_src[(rx + x) * 4 + 2];
+            line_dst[x * 3 + 0] = r;
+            line_dst[x * 3 + 1] = g;
+            line_dst[x * 3 + 2] = b;
+        }
+    }
+    
+    // Encode current region to PNG
+    if (encode_rgb_to_png(current_region_rgb, rw, rh, &draw_op->png_data, &draw_op->png_size) != 0) {
+        fprintf(stderr, "Failed to encode DREG region to PNG\n");
+        free(current_region_rgb);
+        frame_streamer_cleanup_delta_frame(delta_frame);
+        return -1;
+    }
+    
+    free(current_region_rgb);
+    delta_frame->operation_count++;
+    delta_frame->total_payload_size += 4 + 2+2+2+2 + 1+1+2 + draw_op->png_size; // Header + PNG
+    
+    printf("Created delta frame with %d operations: CREG + DREG for region (%d,%d) %dx%d\n",
+           delta_frame->operation_count, rx, ry, rw, rh);
+    
+    return 0; // Success
+}
+
+// Send a delta frame with multiple operations
+int frame_streamer_send_delta_frame(FrameStreamer *streamer, DeltaFrame *delta_frame) {
+    if (!streamer || !delta_frame || delta_frame->operation_count == 0) return -1;
+    
+    UDPServer *server = streamer->udp_server;
+    ClientInfo *client = udp_server_get_client(server);
+    
+    // Build combined payload with all operations
+    unsigned char *payload = (unsigned char*)malloc(delta_frame->total_payload_size);
+    if (!payload) {
+        fprintf(stderr, "Failed to allocate payload buffer\n");
+        return -1;
+    }
+    
+    size_t offset = 0;
+    
+    // Add each operation to the payload
+    for (int i = 0; i < delta_frame->operation_count; i++) {
+        DeltaOperation *op = &delta_frame->operations[i];
+        
+        // Add operation header
+        const char *magic = (op->type == OP_CREG) ? "CREG" : "DREG";
+        memcpy(payload + offset, magic, 4); offset += 4;
+        
+        uint16_t nx = htons(op->x);
+        uint16_t ny = htons(op->y);
+        uint16_t nw = htons(op->width);
+        uint16_t nh = htons(op->height);
+        memcpy(payload + offset, &nx, 2); offset += 2;
+        memcpy(payload + offset, &ny, 2); offset += 2;
+        memcpy(payload + offset, &nw, 2); offset += 2;
+        memcpy(payload + offset, &nh, 2); offset += 2;
+        payload[offset++] = 0; // flags
+        payload[offset++] = 90; // quality hint
+        uint16_t nres = htons(0);
+        memcpy(payload + offset, &nres, 2); offset += 2;
+        
+        // Add PNG data
+        memcpy(payload + offset, op->png_data, op->png_size);
+        offset += op->png_size;
+    }
+    
+    // Send payload in packets
+    size_t data_per_packet = MAX_PACKET_SIZE - sizeof(PacketHeader);
+    size_t total_packets = (delta_frame->total_payload_size + data_per_packet - 1) / data_per_packet;
+    
+    bool send_failed = false;
+    for (size_t packet_id = 0; packet_id < total_packets; packet_id++) {
+        size_t remaining = delta_frame->total_payload_size - (packet_id * data_per_packet);
+        size_t current_data_size = (remaining > data_per_packet) ? data_per_packet : remaining;
+        
+        char packet[MAX_PACKET_SIZE];
+        PacketHeader *header = (PacketHeader*)packet;
+        header->frame_id = htonl(delta_frame->frame_id);
+        header->packet_id = htonl(packet_id);
+        header->total_packets = htonl(total_packets);
+        header->data_size = htonl(current_data_size);
+        
+        memcpy(packet + sizeof(PacketHeader), payload + (packet_id * data_per_packet), current_data_size);
+        
+        ssize_t packet_size = sizeof(PacketHeader) + current_data_size;
+        ssize_t bytes_sent = sendto(server->socket_fd, packet, packet_size, 0,
+                                   (struct sockaddr*)&client->address,
+                                   client->address_len);
+        
+        if (bytes_sent < 0) {
+            fprintf(stderr, "Failed to send delta frame packet %zu/%zu: %s\n", 
+                    packet_id + 1, total_packets, strerror(errno));
+            send_failed = true;
+            break;
+        }
+    }
+    
+    free(payload);
+    
+    if (send_failed) {
+        return -1;
+    }
+    
+    printf("Sent delta frame with %d operations in %zu packets\n", 
+           delta_frame->operation_count, total_packets);
+    
+    return 0;
+}
+
+// Cleanup delta frame resources
+void frame_streamer_cleanup_delta_frame(DeltaFrame *delta_frame) {
+    if (!delta_frame) return;
+    
+    for (int i = 0; i < delta_frame->operation_count; i++) {
+        if (delta_frame->operations[i].png_data) {
+            free(delta_frame->operations[i].png_data);
+            delta_frame->operations[i].png_data = NULL;
+        }
+    }
+    
+    memset(delta_frame, 0, sizeof(DeltaFrame));
 }

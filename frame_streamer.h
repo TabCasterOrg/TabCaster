@@ -10,6 +10,7 @@
 
 #define MAX_PACKET_SIZE 1400
 #define FRAME_HEADER_SIZE 16
+#define MAX_DELTA_OPERATIONS 4  // Support up to 4 operations per frame
 
 // Delta streaming protocol (scaffolding)
 typedef struct __attribute__((packed)) {
@@ -21,6 +22,28 @@ typedef struct __attribute__((packed)) {
     uint8_t quality;    // 0-100 for adaptive quality
     uint16_t reserved;  // alignment
 } RegionHeader;
+
+// Operation types for delta frames
+typedef enum {
+    OP_CREG = 0,  // Clear region (restore to base frame)
+    OP_DREG = 1   // Draw region (apply new content)
+} OperationType;
+
+// Individual delta operation
+typedef struct {
+    OperationType type;
+    uint16_t x, y, width, height;
+    unsigned char *png_data;
+    size_t png_size;
+} DeltaOperation;
+
+// Delta frame containing multiple operations
+typedef struct {
+    uint32_t frame_id;
+    DeltaOperation operations[MAX_DELTA_OPERATIONS];
+    int operation_count;
+    size_t total_payload_size;
+} DeltaFrame;
 
 // Frame packet header structure
 typedef struct __attribute__((packed)) {
@@ -83,5 +106,10 @@ void frame_streamer_cleanup(FrameStreamer *streamer);
 
 // Helper functions
 void frame_streamer_print_status(FrameStreamer *streamer);
+
+// Delta frame functions
+int frame_streamer_create_delta_frame(FrameStreamer *streamer, XImage *frame, DeltaFrame *delta_frame);
+int frame_streamer_send_delta_frame(FrameStreamer *streamer, DeltaFrame *delta_frame);
+void frame_streamer_cleanup_delta_frame(DeltaFrame *delta_frame);
 
 #endif // FRAME_STREAMER_H

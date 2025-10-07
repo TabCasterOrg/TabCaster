@@ -49,6 +49,7 @@
 modules.order
 Module.symvers
 Mkfile.old
+doxy-config
 dkms.conf
 
 # debug information files
@@ -58,3 +59,5 @@ dkms.conf
 build/
 # vscode config
 .vscode/
+latex/
+html/

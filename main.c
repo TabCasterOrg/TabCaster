@@ -41,6 +41,8 @@ void print_usage(const char *program_name) {
     printf("  --delta-keysec N          Keyframe interval in seconds (default: 3)\n");
     printf("  --delta-padding N         Pixels to pad around change regions (default: 8)\n");
     printf("  --delta-minsize N         Minimum region width/height (default: 32)\n");
+    printf("  --delta-maxregions N      Maximum regions per frame (default: 8)\n");
+    printf("  --delta-cellsize N        Grid cell size for region detection (default: 64)\n");
     printf("  --help                    Show this help\n");
     printf("\nExamples:\n");
     printf("  %s --create-mode 2336x1080@60\n", program_name);
@@ -359,6 +361,8 @@ int main(int argc, char *argv[]) {
     int cli_delta_keysec = -1;
     int cli_delta_padding = -1;
     int cli_delta_minsize = -1;
+    int cli_delta_maxregions = -1;
+    int cli_delta_cellsize = -1;
 
     char *mode_spec = NULL;
     char *output_name = NULL;
@@ -432,6 +436,10 @@ int main(int argc, char *argv[]) {
             cli_delta_padding = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--delta-minsize") == 0 && i + 1 < argc) {
             cli_delta_minsize = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--delta-maxregions") == 0 && i + 1 < argc) {
+            cli_delta_maxregions = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--delta-cellsize") == 0 && i + 1 < argc) {
+            cli_delta_cellsize = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--position") == 0 && i + 1 < argc) {
             if (parse_position(argv[++i], &pos_x, &pos_y) != 0) {
                 return 1;
@@ -621,6 +629,14 @@ int main(int argc, char *argv[]) {
         if (cli_delta_minsize >= 0) {
             char buf[16]; snprintf(buf, sizeof(buf), "%d", cli_delta_minsize);
             setenv("TABC_MINSIZE", buf, 1);
+        }
+        if (cli_delta_maxregions >= 0) {
+            char buf[16]; snprintf(buf, sizeof(buf), "%d", cli_delta_maxregions);
+            setenv("TABC_MAXREGIONS", buf, 1);
+        }
+        if (cli_delta_cellsize >= 0) {
+            char buf[16]; snprintf(buf, sizeof(buf), "%d", cli_delta_cellsize);
+            setenv("TABC_CELLSIZE", buf, 1);
         }
         int result = stream_with_resolution_exchange(dm, stream_output, stream_port, capture_fps);
         dm_cleanup(dm);

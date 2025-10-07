@@ -225,6 +225,170 @@ static void apply_region_constraints(int *x, int *y, int *w, int *h,
     *h = padded_h;
 }
 
+// Structure to hold a single change region
+typedef struct {
+    int x, y, width, height;
+    int changed_pixels;
+} ChangeRegion;
+
+// Detect multiple separate change regions using connected component analysis
+static int detect_multiple_regions(const unsigned char *prev_rgb,
+                                  const unsigned char *curr_bgrx,
+                                  int width, int height, int bytes_per_line,
+                                  int threshold, int max_regions, int cell_size,
+                                  ChangeRegion *regions, int *region_count) {
+    if (!prev_rgb || !curr_bgrx || !regions || !region_count || max_regions <= 0) {
+        return 0;
+    }
+    
+    *region_count = 0;
+    
+    // Use smaller cells for better granularity, but group nearby changes
+    int min_cell_size = 16; // Minimum 16x16 cells for better granularity
+    int actual_cell_size = (cell_size < min_cell_size) ? min_cell_size : cell_size;
+    
+    int cells_x = (width + actual_cell_size - 1) / actual_cell_size;
+    int cells_y = (height + actual_cell_size - 1) / actual_cell_size;
+    
+    // Create a change map to track which cells have changes
+    bool *change_map = (bool*)calloc(cells_x * cells_y, sizeof(bool));
+    if (!change_map) return 0;
+    
+    // First pass: detect changed cells
+    for (int cy = 0; cy < cells_y; cy++) {
+        for (int cx = 0; cx < cells_x; cx++) {
+            int cell_x = cx * actual_cell_size;
+            int cell_y = cy * actual_cell_size;
+            int cell_w = (cell_x + actual_cell_size > width) ? width - cell_x : actual_cell_size;
+            int cell_h = (cell_y + actual_cell_size > height) ? height - cell_y : actual_cell_size;
+            
+            // Check if this cell has significant changes
+            int changed_pixels = 0;
+            for (int y = cell_y; y < cell_y + cell_h; y++) {
+                const unsigned char *curr_line = curr_bgrx + y * bytes_per_line;
+                const unsigned char *prev_line = prev_rgb + y * (width * 3);
+                
+                for (int x = cell_x; x < cell_x + cell_w; x++) {
+                    // Extract BGRX components from current frame
+                    unsigned char b = curr_line[x * 4 + 0];
+                    unsigned char g = curr_line[x * 4 + 1];
+                    unsigned char r = curr_line[x * 4 + 2];
+                    
+                    // Extract RGB components from previous frame
+                    int prev_idx = x * 3;
+                    unsigned char prev_r = prev_line[prev_idx + 0];
+                    unsigned char prev_g = prev_line[prev_idx + 1];
+                    unsigned char prev_b = prev_line[prev_idx + 2];
+                    
+                    // Calculate absolute differences
+                    int dr = (int)r - (int)prev_r;
+                    int dg = (int)g - (int)prev_g;
+                    int db = (int)b - (int)prev_b;
+                    
+                    int abs_dr = (dr < 0) ? -dr : dr;
+                    int abs_dg = (dg < 0) ? -dg : dg;
+                    int abs_db = (db < 0) ? -db : db;
+                    
+                    int total_diff = abs_dr + abs_dg + abs_db;
+                    
+                    if (total_diff > threshold) {
+                        changed_pixels++;
+                    }
+                }
+            }
+            
+            // Mark cell as changed if it has enough changes
+            int cell_pixels = cell_w * cell_h;
+            double change_ratio = (double)changed_pixels / (double)cell_pixels;
+            
+            if (change_ratio > 0.02) { // Lower threshold: 2% of pixels changed
+                change_map[cy * cells_x + cx] = true;
+            }
+        }
+    }
+    
+    // Second pass: group connected changed cells into regions
+    bool *visited = (bool*)calloc(cells_x * cells_y, sizeof(bool));
+    if (!visited) {
+        free(change_map);
+        return 0;
+    }
+    
+    for (int cy = 0; cy < cells_y && *region_count < max_regions; cy++) {
+        for (int cx = 0; cx < cells_x && *region_count < max_regions; cx++) {
+            int cell_idx = cy * cells_x + cx;
+            
+            if (change_map[cell_idx] && !visited[cell_idx]) {
+                // Found a new region, flood-fill to find connected cells
+                int min_x = cx, max_x = cx, min_y = cy, max_y = cy;
+                int total_changed_pixels = 0;
+                
+                // Simple flood-fill to find connected region
+                int stack_size = 0;
+                int *stack = (int*)malloc(cells_x * cells_y * 2 * sizeof(int));
+                if (!stack) break;
+                
+                stack[stack_size++] = cx;
+                stack[stack_size++] = cy;
+                visited[cell_idx] = true;
+                
+                while (stack_size > 0) {
+                    int current_cy = stack[--stack_size];
+                    int current_cx = stack[--stack_size];
+                    
+                    // Update bounding box
+                    if (current_cx < min_x) min_x = current_cx;
+                    if (current_cx > max_x) max_x = current_cx;
+                    if (current_cy < min_y) min_y = current_cy;
+                    if (current_cy > max_y) max_y = current_cy;
+                    
+                    // Check neighbors (4-connected)
+                    int neighbors[4][2] = {{-1,0}, {1,0}, {0,-1}, {0,1}};
+                    for (int n = 0; n < 4; n++) {
+                        int nx = current_cx + neighbors[n][0];
+                        int ny = current_cy + neighbors[n][1];
+                        
+                        if (nx >= 0 && nx < cells_x && ny >= 0 && ny < cells_y) {
+                            int neighbor_idx = ny * cells_x + nx;
+                            if (change_map[neighbor_idx] && !visited[neighbor_idx]) {
+                                visited[neighbor_idx] = true;
+                                if (stack_size < cells_x * cells_y * 2 - 2) {
+                                    stack[stack_size++] = nx;
+                                    stack[stack_size++] = ny;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                free(stack);
+                
+                // Convert cell coordinates to pixel coordinates
+                regions[*region_count].x = min_x * actual_cell_size;
+                regions[*region_count].y = min_y * actual_cell_size;
+                regions[*region_count].width = (max_x - min_x + 1) * actual_cell_size;
+                regions[*region_count].height = (max_y - min_y + 1) * actual_cell_size;
+                
+                // Clamp to image boundaries
+                if (regions[*region_count].x + regions[*region_count].width > width) {
+                    regions[*region_count].width = width - regions[*region_count].x;
+                }
+                if (regions[*region_count].y + regions[*region_count].height > height) {
+                    regions[*region_count].height = height - regions[*region_count].y;
+                }
+                
+                regions[*region_count].changed_pixels = total_changed_pixels;
+                (*region_count)++;
+            }
+        }
+    }
+    
+    free(change_map);
+    free(visited);
+    
+    return (*region_count > 0) ? 1 : 0;
+}
+
 // PNG write callback for memory
 static void png_write_data_callback(png_structp png_ptr, png_bytep data, png_size_t length) {
     PNGMemoryData *mem_data = (PNGMemoryData*)png_get_io_ptr(png_ptr);
@@ -430,25 +594,38 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     const char *delta_env = getenv("TABC_DELTA");
     streamer->delta_mode_enabled = (delta_env && strcmp(delta_env, "1") == 0);
 
-    // Tunables with sensible defaults
+    // Tunables
     streamer->diff_threshold = 30;
     streamer->cover_threshold_pct = 80;
     streamer->keyframe_interval = 120;
-    streamer->keyframe_interval_sec = 3; // Send keyframe every 3 seconds
-    streamer->region_padding = 8; // Pad regions by 8 pixels
-    streamer->min_region_size = 32; // Minimum 32x32 region size
+    streamer->keyframe_interval_sec = 3; 
+    streamer->region_padding = 8; 
+    streamer->min_region_size = 32; 
+    streamer->max_regions_per_frame = 8; 
+    streamer->region_cell_size = 32; 
     const char *th_env = getenv("TABC_THRESH");
     const char *cov_env = getenv("TABC_COVER");
     const char *key_env = getenv("TABC_KEYINT");
     const char *keysec_env = getenv("TABC_KEYSEC");
     const char *pad_env = getenv("TABC_PADDING");
     const char *minsize_env = getenv("TABC_MINSIZE");
+    const char *maxregions_env = getenv("TABC_MAXREGIONS");
+    const char *cellsize_env = getenv("TABC_CELLSIZE");
     if (th_env) streamer->diff_threshold = atoi(th_env);
     if (cov_env) streamer->cover_threshold_pct = atoi(cov_env);
     if (key_env) streamer->keyframe_interval = atoi(key_env);
     if (keysec_env) streamer->keyframe_interval_sec = atoi(keysec_env);
     if (pad_env) streamer->region_padding = atoi(pad_env);
     if (minsize_env) streamer->min_region_size = atoi(minsize_env);
+    if (maxregions_env) streamer->max_regions_per_frame = atoi(maxregions_env);
+    if (cellsize_env) streamer->region_cell_size = atoi(cellsize_env);
+    
+    // Cap max_regions_per_frame to prevent stack overflow
+    if (streamer->max_regions_per_frame > MAX_DELTA_OPERATIONS / 2) {
+        streamer->max_regions_per_frame = MAX_DELTA_OPERATIONS / 2;
+        printf("Warning: max_regions_per_frame capped at %d (MAX_DELTA_OPERATIONS/2)\n", 
+               streamer->max_regions_per_frame);
+    }
 
     streamer->captures_since_keyframe = 0;
     
@@ -463,7 +640,7 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     streamer->reference_frame_checksum = 0;
     streamer->last_sent_frame_id = 0;
 
-    printf("Optimized frame streamer initialized for '%s' | delta %s | thresh=%d cover=%d%% keyint=%d keysec=%d pad=%d minsize=%d\n",
+    printf("Optimized frame streamer initialized for '%s' | delta %s | thresh=%d cover=%d%% keyint=%d keysec=%d pad=%d minsize=%d maxregions=%d cellsize=%d\n",
            output_name,
            streamer->delta_mode_enabled ? "ENABLED" : "DISABLED",
            streamer->diff_threshold,
@@ -471,7 +648,9 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
            streamer->keyframe_interval,
            streamer->keyframe_interval_sec,
            streamer->region_padding,
-           streamer->min_region_size);
+           streamer->min_region_size,
+           streamer->max_regions_per_frame,
+           streamer->region_cell_size);
     return streamer;
 }
 
@@ -973,112 +1152,152 @@ int frame_streamer_create_delta_frame(FrameStreamer *streamer, XImage *frame, De
         return -1;
     }
     
-    // Detect changed region
-    int rx = 0, ry = 0, rw = 0, rh = 0, changed_pixels = 0;
-    int changed = compute_changed_bounds_rgb24(streamer->reference_frame_rgb,
-                                               (const unsigned char*)frame->data,
-                                               frame->width, frame->height,
-                                               frame->bytes_per_line,
-                                               streamer->diff_threshold,
-                                               &rx, &ry, &rw, &rh, &changed_pixels);
+    // Detect multiple change regions
+    // Limit regions to half of max operations (each region needs 2 operations: CLEAR + DRAW)
+    int max_regions = (MAX_DELTA_OPERATIONS / 2 < streamer->max_regions_per_frame) ? 
+                      (MAX_DELTA_OPERATIONS / 2) : streamer->max_regions_per_frame;
     
-    if (!changed) {
+    ChangeRegion *regions = (ChangeRegion*)malloc(max_regions * sizeof(ChangeRegion));
+    if (!regions) {
+        fprintf(stderr, "Failed to allocate regions array\n");
+        return -1;
+    }
+    
+    int region_count = 0;
+    
+    int changed = detect_multiple_regions(streamer->reference_frame_rgb,
+                                        (const unsigned char*)frame->data,
+                                        frame->width, frame->height,
+                                        frame->bytes_per_line,
+                                        streamer->diff_threshold,
+                                        max_regions,
+                                        streamer->region_cell_size,
+                                        regions, &region_count);
+    
+    if (!changed || region_count == 0) {
+        free(regions);
         return 1; // No changes detected
     }
     
-    // Apply region constraints (padding and minimum size)
-    apply_region_constraints(&rx, &ry, &rw, &rh, 
-                           frame->width, frame->height,
-                           streamer->region_padding, streamer->min_region_size);
-    
-    // Check coverage threshold
+    // Check total coverage threshold
     size_t total_pixels = (size_t)frame->width * (size_t)frame->height;
-    double coverage_pct = (double)changed_pixels / (double)total_pixels * 100.0;
+    int total_changed_pixels = 0;
+    for (int i = 0; i < region_count; i++) {
+        total_changed_pixels += regions[i].changed_pixels;
+    }
+    double coverage_pct = (double)total_changed_pixels / (double)total_pixels * 100.0;
     
     if (coverage_pct > streamer->cover_threshold_pct) {
+        free(regions);
         return 1; // Coverage too high, should send keyframe instead
     }
     
-    // Create CLEAR operation (CREG) - restore region to base frame state
-    DeltaOperation *clear_op = &delta_frame->operations[delta_frame->operation_count];
-    clear_op->type = OP_CREG;
-    clear_op->x = rx;
-    clear_op->y = ry;
-    clear_op->width = rw;
-    clear_op->height = rh;
-    
-    // Extract the region from reference frame (what client currently has)
-    size_t region_pixels = (size_t)rw * (size_t)rh;
-    size_t region_rgb_size = region_pixels * 3;
-    unsigned char *region_rgb = (unsigned char*)malloc(region_rgb_size);
-    if (!region_rgb) {
-        fprintf(stderr, "Failed to allocate region RGB buffer for CREG\n");
-        return -1;
-    }
-    
-    // Extract region from reference frame (RGB format)
-    for (int y = 0; y < rh; y++) {
-        unsigned char *ref_line = streamer->reference_frame_rgb + 
-                                 ((size_t)(ry + y) * (size_t)frame->width + (size_t)rx) * 3;
-        unsigned char *region_line = region_rgb + (size_t)y * (size_t)rw * 3;
-        memcpy(region_line, ref_line, (size_t)rw * 3);
-    }
-    
-    // Encode reference region to PNG
-    if (encode_rgb_to_png(region_rgb, rw, rh, &clear_op->png_data, &clear_op->png_size) != 0) {
-        fprintf(stderr, "Failed to encode CREG region to PNG\n");
-        free(region_rgb);
-        return -1;
-    }
-    
-    free(region_rgb);
-    delta_frame->operation_count++;
-    delta_frame->total_payload_size += 4 + 2+2+2+2 + 1+1+2 + clear_op->png_size; // Header + PNG
-    
-    // Create DRAW operation (DREG) - apply new content
-    DeltaOperation *draw_op = &delta_frame->operations[delta_frame->operation_count];
-    draw_op->type = OP_DREG;
-    draw_op->x = rx;
-    draw_op->y = ry;
-    draw_op->width = rw;
-    draw_op->height = rh;
-    
-    // Extract the region from current frame (BGRX -> RGB)
-    unsigned char *current_region_rgb = (unsigned char*)malloc(region_rgb_size);
-    if (!current_region_rgb) {
-        fprintf(stderr, "Failed to allocate current region RGB buffer for DREG\n");
-        frame_streamer_cleanup_delta_frame(delta_frame);
-        return -1;
-    }
-    
-    for (int y = 0; y < rh; y++) {
-        const unsigned char *line_src = (unsigned char*)frame->data + 
-                                       (size_t)(ry + y) * (size_t)frame->bytes_per_line;
-        unsigned char *line_dst = current_region_rgb + (size_t)y * (size_t)rw * 3;
-        for (int x = 0; x < rw; x++) {
-            unsigned char b = line_src[(rx + x) * 4 + 0];
-            unsigned char g = line_src[(rx + x) * 4 + 1];
-            unsigned char r = line_src[(rx + x) * 4 + 2];
-            line_dst[x * 3 + 0] = r;
-            line_dst[x * 3 + 1] = g;
-            line_dst[x * 3 + 2] = b;
+    // Process each detected region
+    for (int r = 0; r < region_count && delta_frame->operation_count < MAX_DELTA_OPERATIONS - 1; r++) {
+        int rx = regions[r].x;
+        int ry = regions[r].y;
+        int rw = regions[r].width;
+        int rh = regions[r].height;
+        
+        // Apply region constraints (padding and minimum size)
+        apply_region_constraints(&rx, &ry, &rw, &rh, 
+                               frame->width, frame->height,
+                               streamer->region_padding, streamer->min_region_size);
+        
+        // Create CLEAR operation (CREG) - restore region to base frame state
+        DeltaOperation *clear_op = &delta_frame->operations[delta_frame->operation_count];
+        clear_op->type = OP_CREG;
+        clear_op->x = rx;
+        clear_op->y = ry;
+        clear_op->width = rw;
+        clear_op->height = rh;
+        
+        // Extract the region from reference frame (what client currently has)
+        size_t region_pixels = (size_t)rw * (size_t)rh;
+        size_t region_rgb_size = region_pixels * 3;
+        unsigned char *region_rgb = (unsigned char*)malloc(region_rgb_size);
+        if (!region_rgb) {
+            fprintf(stderr, "Failed to allocate region RGB buffer for CREG\n");
+            frame_streamer_cleanup_delta_frame(delta_frame);
+            free(regions);
+            return -1;
         }
-    }
-    
-    // Encode current region to PNG
-    if (encode_rgb_to_png(current_region_rgb, rw, rh, &draw_op->png_data, &draw_op->png_size) != 0) {
-        fprintf(stderr, "Failed to encode DREG region to PNG\n");
+        
+        // Extract region from reference frame (RGB format)
+        for (int y = 0; y < rh; y++) {
+            unsigned char *ref_line = streamer->reference_frame_rgb + 
+                                     ((size_t)(ry + y) * (size_t)frame->width + (size_t)rx) * 3;
+            unsigned char *region_line = region_rgb + (size_t)y * (size_t)rw * 3;
+            memcpy(region_line, ref_line, (size_t)rw * 3);
+        }
+        
+        // Encode reference region to PNG
+        if (encode_rgb_to_png(region_rgb, rw, rh, &clear_op->png_data, &clear_op->png_size) != 0) {
+            fprintf(stderr, "Failed to encode CREG region to PNG\n");
+            free(region_rgb);
+            frame_streamer_cleanup_delta_frame(delta_frame);
+            free(regions);
+            return -1;
+        }
+        
+        free(region_rgb);
+        delta_frame->operation_count++;
+        delta_frame->total_payload_size += 4 + 2+2+2+2 + 1+1+2 + clear_op->png_size; // Header + PNG
+        
+        // Create DRAW operation (DREG) - apply new content
+        DeltaOperation *draw_op = &delta_frame->operations[delta_frame->operation_count];
+        draw_op->type = OP_DREG;
+        draw_op->x = rx;
+        draw_op->y = ry;
+        draw_op->width = rw;
+        draw_op->height = rh;
+        
+        // Extract the region from current frame (BGRX -> RGB)
+        unsigned char *current_region_rgb = (unsigned char*)malloc(region_rgb_size);
+        if (!current_region_rgb) {
+            fprintf(stderr, "Failed to allocate current region RGB buffer for DREG\n");
+            frame_streamer_cleanup_delta_frame(delta_frame);
+            free(regions);
+            return -1;
+        }
+        
+        for (int y = 0; y < rh; y++) {
+            const unsigned char *line_src = (unsigned char*)frame->data + 
+                                           (size_t)(ry + y) * (size_t)frame->bytes_per_line;
+            unsigned char *line_dst = current_region_rgb + (size_t)y * (size_t)rw * 3;
+            for (int x = 0; x < rw; x++) {
+                unsigned char b = line_src[(rx + x) * 4 + 0];
+                unsigned char g = line_src[(rx + x) * 4 + 1];
+                unsigned char r = line_src[(rx + x) * 4 + 2];
+                line_dst[x * 3 + 0] = r;
+                line_dst[x * 3 + 1] = g;
+                line_dst[x * 3 + 2] = b;
+            }
+        }
+        
+        // Encode current region to PNG
+        if (encode_rgb_to_png(current_region_rgb, rw, rh, &draw_op->png_data, &draw_op->png_size) != 0) {
+            fprintf(stderr, "Failed to encode DREG region to PNG\n");
+            free(current_region_rgb);
+            frame_streamer_cleanup_delta_frame(delta_frame);
+            free(regions);
+            return -1;
+        }
+        
         free(current_region_rgb);
-        frame_streamer_cleanup_delta_frame(delta_frame);
-        return -1;
+        delta_frame->operation_count++;
+        delta_frame->total_payload_size += 4 + 2+2+2+2 + 1+1+2 + draw_op->png_size; // Header + PNG
     }
     
-    free(current_region_rgb);
-    delta_frame->operation_count++;
-    delta_frame->total_payload_size += 4 + 2+2+2+2 + 1+1+2 + draw_op->png_size; // Header + PNG
+    printf("Created delta frame with %d operations (%d regions): ", 
+           delta_frame->operation_count, region_count);
+    for (int r = 0; r < region_count; r++) {
+        printf("(%d,%d) %dx%d ", regions[r].x, regions[r].y, regions[r].width, regions[r].height);
+    }
+    printf("\n");
     
-    printf("Created delta frame with %d operations: CREG + DREG for region (%d,%d) %dx%d\n",
-           delta_frame->operation_count, rx, ry, rw, rh);
+    // Clean up regions array
+    free(regions);
     
     return 0; // Success
 }

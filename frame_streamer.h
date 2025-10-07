@@ -10,7 +10,7 @@
 
 #define MAX_PACKET_SIZE 1400
 #define FRAME_HEADER_SIZE 16
-#define MAX_DELTA_OPERATIONS 4  // Support up to 4 operations per frame
+#define MAX_DELTA_OPERATIONS 16  // Support up to 16 operations per frame
 
 // Delta streaming protocol (scaffolding)
 typedef struct __attribute__((packed)) {
@@ -83,6 +83,8 @@ typedef struct {
     int keyframe_interval_sec;  // send full keyframe every N seconds (default 3)
     int region_padding;         // pixels to pad around detected change regions (default 8)
     int min_region_size;        // minimum region width/height to avoid tiny regions (default 32)
+    int max_regions_per_frame;  // maximum number of regions to process per frame (default 8)
+    int region_cell_size;       // size of grid cells for multi-region detection (default 64)
 
     // Keyframe cadence based on captures (independent of sends)
     int captures_since_keyframe;

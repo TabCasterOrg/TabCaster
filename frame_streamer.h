@@ -81,6 +81,8 @@ typedef struct {
     int cover_threshold_pct;    // max changed coverage percentage for delta (default 80)
     int keyframe_interval;      // send full keyframe every N frames when coverage high (default 120)
     int keyframe_interval_sec;  // send full keyframe every N seconds (default 3)
+    int region_padding;         // pixels to pad around detected change regions (default 8)
+    int min_region_size;        // minimum region width/height to avoid tiny regions (default 32)
 
     // Keyframe cadence based on captures (independent of sends)
     int captures_since_keyframe;

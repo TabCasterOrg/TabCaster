@@ -181,6 +181,50 @@ static int compute_changed_bounds_rgb24(const unsigned char *prev_rgb,
     return 1;
 }
 
+// Apply padding and minimum size constraints to region bounds
+static void apply_region_constraints(int *x, int *y, int *w, int *h, 
+                                   int frame_width, int frame_height,
+                                   int padding, int min_size) {
+    if (!x || !y || !w || !h) return;
+    
+    // Apply padding
+    int padded_x = *x - padding;
+    int padded_y = *y - padding;
+    int padded_w = *w + (2 * padding);
+    int padded_h = *h + (2 * padding);
+    
+    // Clamp to frame boundaries
+    if (padded_x < 0) padded_x = 0;
+    if (padded_y < 0) padded_y = 0;
+    if (padded_x + padded_w > frame_width) padded_w = frame_width - padded_x;
+    if (padded_y + padded_h > frame_height) padded_h = frame_height - padded_y;
+    
+    // Apply minimum size constraint
+    if (padded_w < min_size) {
+        // Center the region horizontally
+        int center_x = padded_x + padded_w / 2;
+        padded_x = center_x - min_size / 2;
+        if (padded_x < 0) padded_x = 0;
+        if (padded_x + min_size > frame_width) padded_x = frame_width - min_size;
+        padded_w = min_size;
+    }
+    
+    if (padded_h < min_size) {
+        // Center the region vertically
+        int center_y = padded_y + padded_h / 2;
+        padded_y = center_y - min_size / 2;
+        if (padded_y < 0) padded_y = 0;
+        if (padded_y + min_size > frame_height) padded_y = frame_height - min_size;
+        padded_h = min_size;
+    }
+    
+    // Update output values
+    *x = padded_x;
+    *y = padded_y;
+    *w = padded_w;
+    *h = padded_h;
+}
+
 // PNG write callback for memory
 static void png_write_data_callback(png_structp png_ptr, png_bytep data, png_size_t length) {
     PNGMemoryData *mem_data = (PNGMemoryData*)png_get_io_ptr(png_ptr);
@@ -391,14 +435,20 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     streamer->cover_threshold_pct = 80;
     streamer->keyframe_interval = 120;
     streamer->keyframe_interval_sec = 3; // Send keyframe every 3 seconds
+    streamer->region_padding = 8; // Pad regions by 8 pixels
+    streamer->min_region_size = 32; // Minimum 32x32 region size
     const char *th_env = getenv("TABC_THRESH");
     const char *cov_env = getenv("TABC_COVER");
     const char *key_env = getenv("TABC_KEYINT");
     const char *keysec_env = getenv("TABC_KEYSEC");
+    const char *pad_env = getenv("TABC_PADDING");
+    const char *minsize_env = getenv("TABC_MINSIZE");
     if (th_env) streamer->diff_threshold = atoi(th_env);
     if (cov_env) streamer->cover_threshold_pct = atoi(cov_env);
     if (key_env) streamer->keyframe_interval = atoi(key_env);
     if (keysec_env) streamer->keyframe_interval_sec = atoi(keysec_env);
+    if (pad_env) streamer->region_padding = atoi(pad_env);
+    if (minsize_env) streamer->min_region_size = atoi(minsize_env);
 
     streamer->captures_since_keyframe = 0;
     
@@ -413,13 +463,15 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     streamer->reference_frame_checksum = 0;
     streamer->last_sent_frame_id = 0;
 
-    printf("Optimized frame streamer initialized for '%s' | delta %s | thresh=%d cover=%d%% keyint=%d keysec=%d\n",
+    printf("Optimized frame streamer initialized for '%s' | delta %s | thresh=%d cover=%d%% keyint=%d keysec=%d pad=%d minsize=%d\n",
            output_name,
            streamer->delta_mode_enabled ? "ENABLED" : "DISABLED",
            streamer->diff_threshold,
            streamer->cover_threshold_pct,
            streamer->keyframe_interval,
-           streamer->keyframe_interval_sec);
+           streamer->keyframe_interval_sec,
+           streamer->region_padding,
+           streamer->min_region_size);
     return streamer;
 }
 
@@ -933,6 +985,11 @@ int frame_streamer_create_delta_frame(FrameStreamer *streamer, XImage *frame, De
     if (!changed) {
         return 1; // No changes detected
     }
+    
+    // Apply region constraints (padding and minimum size)
+    apply_region_constraints(&rx, &ry, &rw, &rh, 
+                           frame->width, frame->height,
+                           streamer->region_padding, streamer->min_region_size);
     
     // Check coverage threshold
     size_t total_pixels = (size_t)frame->width * (size_t)frame->height;

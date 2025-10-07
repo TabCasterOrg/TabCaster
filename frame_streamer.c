@@ -390,14 +390,20 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     streamer->diff_threshold = 30;
     streamer->cover_threshold_pct = 80;
     streamer->keyframe_interval = 120;
+    streamer->keyframe_interval_sec = 3; // Send keyframe every 3 seconds
     const char *th_env = getenv("TABC_THRESH");
     const char *cov_env = getenv("TABC_COVER");
     const char *key_env = getenv("TABC_KEYINT");
+    const char *keysec_env = getenv("TABC_KEYSEC");
     if (th_env) streamer->diff_threshold = atoi(th_env);
     if (cov_env) streamer->cover_threshold_pct = atoi(cov_env);
     if (key_env) streamer->keyframe_interval = atoi(key_env);
+    if (keysec_env) streamer->keyframe_interval_sec = atoi(keysec_env);
 
     streamer->captures_since_keyframe = 0;
+    
+    // Initialize time-based keyframe tracking
+    gettimeofday(&streamer->last_keyframe_time, NULL);
     
     // Initialize inactivity detection
     gettimeofday(&streamer->last_activity_time, NULL);
@@ -407,12 +413,13 @@ FrameStreamer* frame_streamer_init(UDPServer *udp_server, const char *output_nam
     streamer->reference_frame_checksum = 0;
     streamer->last_sent_frame_id = 0;
 
-    printf("Optimized frame streamer initialized for '%s' | delta %s | thresh=%d cover=%d%% keyint=%d\n",
+    printf("Optimized frame streamer initialized for '%s' | delta %s | thresh=%d cover=%d%% keyint=%d keysec=%d\n",
            output_name,
            streamer->delta_mode_enabled ? "ENABLED" : "DISABLED",
            streamer->diff_threshold,
            streamer->cover_threshold_pct,
-           streamer->keyframe_interval);
+           streamer->keyframe_interval,
+           streamer->keyframe_interval_sec);
     return streamer;
 }
 
@@ -564,17 +571,23 @@ int frame_streamer_send_frame(FrameStreamer *streamer, XImage *frame) {
         
         struct timeval now;
         gettimeofday(&now, NULL);
+        
+        // Check time-based keyframe interval
+        long time_since_keyframe = (now.tv_sec - streamer->last_keyframe_time.tv_sec) * 1000000 +
+                                  (now.tv_usec - streamer->last_keyframe_time.tv_usec);
+        bool time_keyframe = (time_since_keyframe > streamer->keyframe_interval_sec * 1000000);
+        
         long time_since_activity = (now.tv_sec - streamer->last_activity_time.tv_sec) * 1000000 +
                                   (now.tv_usec - streamer->last_activity_time.tv_usec);
         bool inactivity_keyframe = (time_since_activity > streamer->inactivity_threshold_sec * 1000000);
         
         if (debug_output) {
-            printf("  Force keyframe: %s, Inactivity keyframe: %s\n", 
-                   force_keyframe ? "YES" : "NO", inactivity_keyframe ? "YES" : "NO");
+            printf("  Force keyframe: %s, Time keyframe: %s, Inactivity keyframe: %s\n", 
+                   force_keyframe ? "YES" : "NO", time_keyframe ? "YES" : "NO", inactivity_keyframe ? "YES" : "NO");
         }
         
         // Try to create delta frame if not forcing keyframe
-        if (!force_keyframe && !inactivity_keyframe) {
+        if (!force_keyframe && !time_keyframe && !inactivity_keyframe) {
             DeltaFrame delta_frame;
             int delta_result = frame_streamer_create_delta_frame(streamer, frame, &delta_frame);
             
@@ -703,6 +716,7 @@ send_full_frame:
         
         // Reset keyframe counter and update timestamps
         streamer->captures_since_keyframe = 0;
+        gettimeofday(&streamer->last_keyframe_time, NULL);
         gettimeofday(&streamer->last_activity_time, NULL);
         streamer->reference_frame_checksum = compute_checksum(streamer->reference_frame_rgb, streamer->reference_size);
         streamer->last_sent_frame_id = streamer->frame_id;

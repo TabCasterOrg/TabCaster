@@ -38,6 +38,7 @@ void print_usage(const char *program_name) {
     printf("  --delta-thresh N          Delta per-pixel diff threshold (default: 30)\n");
     printf("  --delta-cover N           Max delta coverage %% before keyframe (default: 80)\n");
     printf("  --delta-keyint N          Keyframe interval in frames (default: 120)\n");
+    printf("  --delta-keysec N          Keyframe interval in seconds (default: 3)\n");
     printf("  --help                    Show this help\n");
     printf("\nExamples:\n");
     printf("  %s --create-mode 2336x1080@60\n", program_name);
@@ -353,6 +354,7 @@ int main(int argc, char *argv[]) {
     int cli_delta_thresh = -1;
     int cli_delta_cover = -1;
     int cli_delta_keyint = -1;
+    int cli_delta_keysec = -1;
 
     char *mode_spec = NULL;
     char *output_name = NULL;
@@ -420,6 +422,8 @@ int main(int argc, char *argv[]) {
             cli_delta_cover = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--delta-keyint") == 0 && i + 1 < argc) {
             cli_delta_keyint = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--delta-keysec") == 0 && i + 1 < argc) {
+            cli_delta_keysec = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--position") == 0 && i + 1 < argc) {
             if (parse_position(argv[++i], &pos_x, &pos_y) != 0) {
                 return 1;
@@ -597,6 +601,10 @@ int main(int argc, char *argv[]) {
         if (cli_delta_keyint >= 0) {
             char buf[16]; snprintf(buf, sizeof(buf), "%d", cli_delta_keyint);
             setenv("TABC_KEYINT", buf, 1);
+        }
+        if (cli_delta_keysec >= 0) {
+            char buf[16]; snprintf(buf, sizeof(buf), "%d", cli_delta_keysec);
+            setenv("TABC_KEYSEC", buf, 1);
         }
         int result = stream_with_resolution_exchange(dm, stream_output, stream_port, capture_fps);
         dm_cleanup(dm);

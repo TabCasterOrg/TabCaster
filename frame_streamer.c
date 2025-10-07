@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <time.h>
 #include <png.h>
 #include <setjmp.h>
 
@@ -985,6 +986,10 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
     
     streamer->streaming = true;
     
+    // Detect client disconnection via timeout
+    static time_t last_successful_send = 0;
+    if (last_successful_send == 0) last_successful_send = time(NULL);
+    
     while (keep_streaming && streamer->streaming) {
         // Check for keyframe requests from client
         frame_streamer_handle_keyframe_request(streamer);
@@ -996,6 +1001,7 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
             if (frame) {
                 int send_result = frame_streamer_send_frame(streamer, frame);
                 if (send_result == 0) {
+                    last_successful_send = time(NULL);
                     streamer->frames_sent++;
                     streamer->frame_id++;
                     streamer->captures_since_keyframe = 0;
@@ -1005,6 +1011,11 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
                     }
                 } else if (send_result < 0) {
                     fprintf(stderr, "Failed to send frame %d\n", streamer->frame_id);
+                    // Check for client disconnection timeout
+                    if (time(NULL) - last_successful_send > 5) {
+                        printf("Client appears disconnected (5s timeout)\n");
+                        break;  // Exit loop to allow cleanup
+                    }
                 } else {
                     // Skipped send: increment cadence counter
                     streamer->captures_since_keyframe++;
@@ -1123,6 +1134,11 @@ void frame_streamer_cleanup(FrameStreamer *streamer) {
     
     // Cleanup display configuration
     cleanup_display_config(streamer);
+    
+    // NEW: Reset UDP server state for reconnection
+    if (streamer->udp_server) {
+        udp_server_reset_client_state(streamer->udp_server);
+    }
     
     // Cleanup frame capture
     if (streamer->frame_capture) {

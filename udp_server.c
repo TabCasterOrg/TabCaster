@@ -413,6 +413,18 @@ void udp_server_print_status(UDPServer *server) {
     }
 }
 
+// Reset client state for reconnection
+void udp_server_reset_client_state(UDPServer *server) {
+    if (!server) return;
+    
+    server->client_connected = false;
+    server->client.state = CLIENT_STATE_DISCONNECTED;
+    server->client.mode_id = 0;
+    memset(server->client.output_name, 0, sizeof(server->client.output_name));
+    
+    printf("Client state reset - ready for new connection\n");
+}
+
 // Cleanup resources
 void udp_server_cleanup(UDPServer *server) {
     if (!server) return;

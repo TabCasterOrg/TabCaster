@@ -23,6 +23,34 @@ sudo dnf install gcc libX11-devel libXrandr-devel  libxfixes-delvel
 sudo pacman -S gcc libx11 libxrandr libxfixes
 ```
 
+## Using Prebuilt Binaries
+
+If you don’t want to compile the code yourself, you can download a ready-to-run binary from the **[Releases](https://github.com/TabCasterOrg/TabCaster/releases)** page.
+
+**Example (Linux x86_64):**
+```bash
+wget https://github.com/TabCasterOrg/TabCaster/releases/latest/download/tabcaster-linux-x86_64.tar.gz
+tar -xzf tabcaster-linux-x86_64.tar.gz
+./tabcaster
+```
+This will print out the outputs you have available (eg HDMI-1, DP-1, etc). 
+
+For quick start
+
+```bash
+./tabcaster --stream <output>
+```
+or for delta streaming (experimental)
+
+```bash
+./tabcaster --stream <output> --delta
+```
+For more info
+
+```bash
+./tabcaster -h
+```
+
 ## Building
 
 **Clone the project:**

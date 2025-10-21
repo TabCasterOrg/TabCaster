@@ -59,7 +59,7 @@ void print_usage(const char *program_name) {
     printf("\nStreaming:\n");
     printf("  --stream creates a display based on client resolution and streams frames.\n");
     printf("  The client sends its resolution during handshake.\n");
-    printf("  Streaming always uses auto-positioning (left of primary).\n");
+    printf("  Streaming always uses auto-positioning (right of primary).\n");
 }
 
 // Parse mode specification (WxH@R format)

@@ -20,8 +20,15 @@ Steps to reproduce the behavior:
 **Expected behavior**
 A clear and concise description of what you expected to happen.
 
+**Terminal Output**
+```
+add the output of TabCaster's terminal process here
+```
+
 **Screenshots**
-If applicable, add screenshots to help explain your problem.
+Add screenshots to help explain your problem.
+
+
 
 **Desktop (please complete the following information):**
  - Distribution [e.g. Debian, Mint, Arch, e.t.c.]

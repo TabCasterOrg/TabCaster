@@ -187,14 +187,12 @@ int udp_server_try_resolution(UDPServer *server, const char *target_output,
 }
 
 // Create display for client with fallback resolution support
-// Create display for client with fallback resolution support
 int udp_server_create_display_for_client(UDPServer *server, const char *target_output) {
     if (!server || !target_output || server->client.state != CLIENT_STATE_RESOLUTION_SET) {
         return -1;
     }
     
     ClientInfo *client = &server->client;
-    
     printf("\n=== Creating display for client ===\n");
     printf("Target output: %s\n", target_output);
     printf("Requested resolution: %ux%u @ %.2f Hz\n", 
@@ -204,10 +202,8 @@ int udp_server_create_display_for_client(UDPServer *server, const char *target_o
     // First, try the client's requested resolution at different refresh rates
     printf("\n--- Trying client's requested resolution with adjusted refresh rates ---\n");
     double original_refresh = client->refresh_rate;
-    
     for (double refresh = original_refresh; refresh >= 30.0; refresh -= 10.0) {
         printf("Attempt: %ux%u @ %.2f Hz\n", client->width, client->height, refresh);
-        
         if (udp_server_try_resolution(server, target_output, 
                                      client->width, client->height, refresh) == 0) {
             printf("✓ Client's resolution works at %.2f Hz!\n", refresh);
@@ -220,7 +216,6 @@ int udp_server_create_display_for_client(UDPServer *server, const char *target_o
                         "RESOLUTION_CHANGED:%ux%u:%.1f", client->width, client->height, refresh);
                 udp_server_send_response(server, resolution_change);
             }
-            
             return udp_server_send_display_info(server);
         }
     }
@@ -229,7 +224,6 @@ int udp_server_create_display_for_client(UDPServer *server, const char *target_o
            original_refresh);
     
     printf("\n--- Trying fallback resolutions ---\n");
-    
     for (size_t i = 0; i < num_fallback_resolutions; i++) {
         unsigned int width = fallback_resolutions[i].width;
         unsigned int height = fallback_resolutions[i].height;
@@ -241,22 +235,24 @@ int udp_server_create_display_for_client(UDPServer *server, const char *target_o
         }
         
         printf("\nFallback %zu/%zu: ", i + 1, num_fallback_resolutions);
-        if (udp_server_try_resolution(server, target_output, width, height, refresh_rate) == 0) {
-            printf("✓ Fallback resolution %ux%u @ %.1f Hz works!\n", width, height, refresh_rate);
-            
-            // Refresh display manager state
-            dm_get_screens(server->dm);
-            
-            // Send resolution change notification to client
-            char resolution_change[256];
-            snprintf(resolution_change, sizeof(resolution_change), 
-                    "RESOLUTION_CHANGED:%ux%u:%.1f", width, height, refresh_rate);
-            
-            if (udp_server_send_response(server, resolution_change) != 0) {
-                return -1;
+        
+        // Try the fallback resolution at different refresh rates
+        for (double refresh = refresh_rate; refresh >= 30.0; refresh -= 10.0) {
+            printf("Attempt: %ux%u @ %.2f Hz\n", width, height, refresh);
+            if (udp_server_try_resolution(server, target_output, width, height, refresh) == 0) {
+                printf("✓ Fallback resolution %ux%u @ %.1f Hz works!\n", width, height, refresh);
+                // Refresh display manager state
+                dm_get_screens(server->dm);
+                
+                // Send resolution change notification to client
+                char resolution_change[256];
+                snprintf(resolution_change, sizeof(resolution_change), 
+                        "RESOLUTION_CHANGED:%ux%u:%.1f", width, height, refresh);
+                if (udp_server_send_response(server, resolution_change) != 0) {
+                    return -1;
+                }
+                return udp_server_send_display_info(server);
             }
-            
-            return udp_server_send_display_info(server);
         }
     }
     
@@ -264,7 +260,7 @@ int udp_server_create_display_for_client(UDPServer *server, const char *target_o
     printf("\n✗ All resolutions failed - graphics card may not support any of these modes\n");
     printf("Fallback resolutions tried:\n");
     for (size_t i = 0; i < num_fallback_resolutions; i++) {
-        printf("  - %ux%u @ %.1f Hz\n", 
+        printf("  - %ux%u @ %.1f Hz (and lower refresh rates)\n", 
                fallback_resolutions[i].width, 
                fallback_resolutions[i].height,
                fallback_resolutions[i].refresh_rate);
@@ -273,6 +269,7 @@ int udp_server_create_display_for_client(UDPServer *server, const char *target_o
     udp_server_send_response(server, "DISPLAY_ERROR:All resolutions failed - graphics card incompatible");
     return -1;
 }
+
 // Handle complete handshake process
 int udp_server_handle_handshake(UDPServer *server) {
     if (!server) return -1;

@@ -391,10 +391,10 @@ int frame_streamer_run_loop(FrameStreamer *streamer) {
         }
         
         usleep(500); 
-    
+    }
     printf("\nStreamed %d PNG frames total\n", streamer->frames_sent);
     return 0;
-}}
+}
 
 // Start streaming
 int frame_streamer_start(FrameStreamer *streamer) {
